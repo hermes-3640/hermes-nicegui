@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from typing import cast
+
+from nicegui import ui
 from nicegui.testing import User
 
 from hermes_nicegui import web
@@ -40,7 +43,13 @@ async def test_click_row_navigates_to_detail(user: User, context: PluginContext)
     await user.should_see("Raw YAML", retries=10)
 
 
-async def test_create_job_dialog_adds_row(user: User, context: PluginContext) -> None:
+async def test_create_job_dialog_records_cli_call_and_appears_in_list(
+    user: User, context: PluginContext, fake_hermes_cli
+) -> None:
+    """Creating a job has no structured response from `hermes cron create`,
+    so this checks both that the CLI call went out with the right args *and*
+    that the list's re-read afterwards (`cron/jobs.json`, written by the
+    fake CLI the same way the real one would) picks up the new job."""
     web.build(context, [CronPlugin(context)])
     await user.open("/cron")
     await user.should_see("Nightly report")
@@ -51,4 +60,42 @@ async def test_create_job_dialog_adds_row(user: User, context: PluginContext) ->
     user.find(marker="new-job-schedule").type("every 1h")
     user.find(marker="create-job-confirm").click()
 
+    await user.should_see("Job created", retries=10)
+    assert fake_hermes_cli.jobs_actions == [
+        ("cron", "create", "every 1h", "--name", "Log rotation")
+    ]
     await user.should_see("Log rotation", retries=10)
+
+
+async def test_list_paginates_with_numbered_pages(
+    user: User, context: PluginContext, fake_hermes_cli
+) -> None:
+    for i in range(35):
+        fake_hermes_cli.insert_job(
+            {
+                "id": f"job-extra-{i}",
+                "name": f"Extra job {i}",
+                "prompt": "",
+                "schedule_display": "every 1h",
+                "deliver": "local",
+                "skills": [],
+                "repeat": {"times": None, "completed": 0},
+                "enabled": True,
+                "state": "scheduled",
+                "created_at": "2026-08-13T00:00:00+00:00",
+                "next_run_at": "2026-08-14T00:00:00+00:00",
+                "last_run_at": None,
+                "last_status": None,
+                "last_error": None,
+            }
+        )
+    web.build(context, [CronPlugin(context)])
+    await user.open("/cron")
+    await user.should_see("Nightly report")
+    assert len(user.find(marker="job-row").elements) == 30
+
+    pager = cast(ui.pagination, next(iter(user.find(marker="page-control").elements)))
+    pager.set_value(2)
+    await user.should_see("Extra job 30", retries=10)
+    assert len(user.find(marker="job-row").elements) == 6
+    await user.should_not_see("Nightly report", retries=10)

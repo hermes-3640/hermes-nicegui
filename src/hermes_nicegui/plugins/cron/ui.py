@@ -1,11 +1,17 @@
 """Cron plugin pages: job list + a per-job detail/edit view.
 
+Listing reads `cron/jobs.json` directly; create/pause/resume/run/remove/edit
+go through the `hermes` CLI -- both via `web.current_store().cron` (see
+`hermes_nicegui.store`), scoped to whichever profile is active for this
+browser tab.
+
 The detail page offers two ways to edit a job: a plain form over the core
-fields (name, schedule, prompt, deliver, skills, repeat) that PATCHes just
-those keys, and a raw-YAML tab (``ui.codemirror``) over the job's full record
-for anything the form doesn't expose -- the gateway's ``PATCH /api/jobs/{id}``
-already whitelists fields server-side, so posting the full parsed YAML back
-is as safe as the form path.
+fields (name, schedule, prompt, deliver, skills, repeat), and a raw-YAML tab
+(``ui.codemirror``) over the job's full record. Both funnel through
+`CronStore.save_fields`, which only ever passes `hermes cron edit` the flags
+for fields actually present -- editing via YAML can't set anything the form
+couldn't (the CLI has no generic field-setter), which mirrors what the old
+dashboard-REST path's own server-side whitelist already limited it to.
 """
 
 from __future__ import annotations
@@ -16,7 +22,9 @@ from typing import Any
 import yaml
 from nicegui import background_tasks, ui
 
+from hermes_nicegui import web
 from hermes_nicegui.gateway import HermesError, Job
+from hermes_nicegui.pagination import Pager, render_pager
 from hermes_nicegui.plugin import Plugin
 from hermes_nicegui.plugins.cron.logic import (
     fmt_iso,
@@ -32,7 +40,6 @@ from hermes_nicegui.web import frame
 
 
 def register_pages(plugin: Plugin) -> None:
-    client = plugin.client
     logger = plugin.logger
 
     def _create_job_dialog(on_created: Any) -> None:
@@ -50,9 +57,7 @@ def register_pages(plugin: Plugin) -> None:
             )
             prompt = ui.textarea("Prompt").props("outlined dense").classes("w-full")
             deliver = (
-                ui.input("Deliver", placeholder="local")
-                .props("outlined dense")
-                .classes("w-full")
+                ui.input("Deliver", placeholder="local").props("outlined dense").classes("w-full")
             )
             skills = (
                 ui.input("Skills", placeholder="comma-separated")
@@ -72,7 +77,7 @@ def register_pages(plugin: Plugin) -> None:
                     ui.notify("Name and schedule are required", type="warning")
                     return
                 try:
-                    job = await client.create_job(
+                    await web.current_store().cron.create(
                         name=new_name,
                         schedule=new_schedule,
                         prompt=prompt.value or "",
@@ -85,13 +90,13 @@ def register_pages(plugin: Plugin) -> None:
                     return
                 dialog.close()
                 ui.notify("Job created", type="positive")
-                on_created(job)
+                on_created()
 
             with ui.row().classes("w-full justify-end gap-2"):
                 ui.button("Cancel", on_click=dialog.close).props("flat")
-                ui.button(
-                    "Create", on_click=lambda: background_tasks.create(do_create())
-                ).mark("create-job-confirm")
+                ui.button("Create", on_click=lambda: background_tasks.create(do_create())).mark(
+                    "create-job-confirm"
+                )
         dialog.open()
 
     @ui.page("/cron", title="Cron Jobs")
@@ -101,17 +106,18 @@ def register_pages(plugin: Plugin) -> None:
                 ui.label("Scheduled jobs").classes("text-lg")
                 ui.space()
                 ui.button(
-                    icon="refresh", on_click=lambda: background_tasks.create(load_list())
+                    icon="refresh", on_click=lambda: background_tasks.create(_refresh())
                 ).props("flat round dense").mark("refresh-button").tooltip("Refresh")
                 ui.button(
                     "New job",
                     icon="add",
                     on_click=lambda: _create_job_dialog(
-                        lambda _job: background_tasks.create(load_list())
+                        lambda: background_tasks.create(load_list())
                     ),
                 ).mark("new-job-button")
 
             list_container = ui.list().props("separator").classes("w-full")
+            pager = Pager()
 
             def render_job_row(job: Job) -> None:
                 icon, color = state_icon(job.state)
@@ -131,7 +137,9 @@ def register_pages(plugin: Plugin) -> None:
 
             async def load_list() -> None:
                 try:
-                    jobs = await client.list_jobs()
+                    jobs, total = await web.current_store().cron.list_jobs(
+                        limit=pager.limit, offset=pager.offset
+                    )
                 except HermesError as exc:
                     ui.notify(f"Failed to load jobs: {exc}", type="negative")
                     return
@@ -141,17 +149,20 @@ def register_pages(plugin: Plugin) -> None:
                         ui.label("No cron jobs yet.")
                     for job in jobs:
                         render_job_row(job)
+                    render_pager(pager, total, lambda: background_tasks.create(load_list()))
+
+            async def _refresh() -> None:
+                pager.reset()
+                await load_list()
 
             await load_list()
             logger.debug("cron list rendered")
 
     def _pause_resume(job: Job, on_updated: Any) -> None:
         async def do_toggle() -> None:
+            store = web.current_store().cron
             try:
-                if job.enabled:
-                    updated = await client.pause_job(job.id)
-                else:
-                    updated = await client.resume_job(job.id)
+                updated = await (store.pause(job.id) if job.enabled else store.resume(job.id))
             except HermesError as exc:
                 ui.notify(f"Failed: {exc}", type="negative")
                 return
@@ -163,7 +174,7 @@ def register_pages(plugin: Plugin) -> None:
     def _run_now(job_id: str, on_updated: Any) -> None:
         async def do_run() -> None:
             try:
-                updated = await client.run_job(job_id)
+                updated = await web.current_store().cron.run(job_id)
             except HermesError as exc:
                 ui.notify(f"Run failed: {exc}", type="negative")
                 return
@@ -175,7 +186,7 @@ def register_pages(plugin: Plugin) -> None:
     def _delete_job(job_id: str, on_deleted: Any) -> None:
         async def do_delete() -> None:
             try:
-                await client.delete_job(job_id)
+                await web.current_store().cron.delete(job_id)
             except HermesError as exc:
                 ui.notify(f"Delete failed: {exc}", type="negative")
                 return
@@ -187,7 +198,7 @@ def register_pages(plugin: Plugin) -> None:
     def _save_fields(job_id: str, fields: dict[str, Any], on_updated: Any) -> None:
         async def do_save() -> None:
             try:
-                updated = await client.update_job(job_id, fields)
+                updated = await web.current_store().cron.save_fields(job_id, fields)
             except HermesError as exc:
                 ui.notify(f"Save failed: {exc}", type="negative")
                 return
@@ -200,7 +211,7 @@ def register_pages(plugin: Plugin) -> None:
     async def cron_detail_page(job_id: str) -> None:
         with frame(active="/cron"):
             try:
-                job = await client.get_job(job_id)
+                job = await web.current_store().cron.get_job(job_id)
             except HermesError as exc:
                 ui.label(f"Failed to load job: {exc}")
                 return
@@ -225,9 +236,9 @@ def register_pages(plugin: Plugin) -> None:
                         icon="pause" if job.enabled else "play_arrow",
                     ).mark("pause-resume-button")
                     run_button = ui.button("Run now", icon="play_circle").mark("run-now-button")
-                    delete_button = ui.button(
-                        "Delete", icon="delete", color="negative"
-                    ).mark("delete-job-button")
+                    delete_button = ui.button("Delete", icon="delete", color="negative").mark(
+                        "delete-job-button"
+                    )
 
             def apply_update(updated: Job) -> None:
                 nonlocal job
@@ -242,9 +253,7 @@ def register_pages(plugin: Plugin) -> None:
 
             pause_button.on_click(lambda: _pause_resume(job, apply_update))
             run_button.on_click(lambda: _run_now(job_id, apply_update))
-            delete_button.on_click(
-                lambda: _delete_job(job_id, lambda: ui.navigate.to("/cron"))
-            )
+            delete_button.on_click(lambda: _delete_job(job_id, lambda: ui.navigate.to("/cron")))
 
             with ui.tabs().classes("w-full") as tabs:
                 details_tab = ui.tab("details", label="Details")
@@ -312,8 +321,6 @@ def register_pages(plugin: Plugin) -> None:
                             return
                         _save_fields(job_id, fields, apply_update)
 
-                    ui.button("Save YAML", icon="save", on_click=save_yaml).mark(
-                        "save-yaml-button"
-                    )
+                    ui.button("Save YAML", icon="save", on_click=save_yaml).mark("save-yaml-button")
 
             logger.debug("cron detail rendered for {}", job_id)

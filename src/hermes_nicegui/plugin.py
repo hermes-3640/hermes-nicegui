@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from loguru import Logger
 
     from hermes_nicegui.config import Settings
+    from hermes_nicegui.executor import HermesExecutor
     from hermes_nicegui.gateway import HermesClient
 
 ENTRY_POINT_GROUP = "hermes_nicegui.plugins"
@@ -36,9 +37,14 @@ class NavItem:
 class PluginContext:
     """Shared services handed to every plugin at startup."""
 
-    client: HermesClient
     settings: Settings
     logger: Logger
+    executor: HermesExecutor
+    # The gateway's bearer-token client. Nothing uses this anymore --
+    # sessions/cron reach Hermes through `executor` (the CLI) instead, and
+    # kanban has its own dashboard client -- but it's cheap to keep wired up
+    # for now rather than ripping out working, tested code.
+    client: HermesClient | None = None
 
     def log(self) -> Logger:
         return self.logger

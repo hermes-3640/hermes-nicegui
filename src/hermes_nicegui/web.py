@@ -11,20 +11,84 @@ through the whole process entrypoint.
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
 from functools import partial
 from typing import TYPE_CHECKING
 
 from loguru import logger as _logger
-from nicegui import ui
+from nicegui import app, ui
 
+from hermes_nicegui.auth import UserStore
 from hermes_nicegui.plugin import NavItem, Plugin, PluginContext, load_plugins
+from hermes_nicegui.store import HermesStore, build_store
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from hermes_nicegui.config import Settings
+    from hermes_nicegui.executor import HermesExecutor
     from hermes_nicegui.gateway import HermesClient
+
+_PROFILE_KEY = "profile"
+
+
+def current_profile() -> str:
+    """The active Hermes profile for this browser session.
+
+    Backed by ``app.storage.user`` (a signed cookie + server-side dict,
+    keyed by the browser's session cookie -- the same storage
+    ``AuthMiddleware``/the login flow already use) rather than
+    ``app.storage.client``. ``client`` storage is scoped to the current
+    *connection*, not the tab: NiceGUI's own docs say outright that it "is
+    discarded when the connection to the client is lost through a page
+    reload or a navigation" -- and since every page here is a distinct
+    ``@ui.page`` route, an ordinary click from one page to another *is* a
+    navigation. Using it here meant the selected profile silently reverted
+    to the default on every single page change, confirmed live (not caught
+    by the test suite, which doesn't reproduce a real browser's navigation
+    behavior). ``app.storage.tab`` would persist correctly but isn't
+    readable this early either -- it needs the client's websocket already
+    connected, and this is read synchronously in ``frame()``'s header,
+    before most pages await that connection.
+
+    The trade-off: the active profile is now per browser *session*
+    (shared across tabs, like ``app.storage.user["authenticated"]`` already
+    is), not per tab. Empty string means the default profile, matching the
+    convention `hermes_cli`/the dashboard both already use.
+    """
+    try:
+        return app.storage.user.get(_PROFILE_KEY, "")
+    except RuntimeError:  # pragma: no cover - storage disabled in some test setups
+        return ""
+
+
+def set_current_profile(name: str) -> None:
+    try:
+        app.storage.user[_PROFILE_KEY] = name
+    except RuntimeError:  # pragma: no cover - storage disabled in some test setups
+        pass
+
+
+def current_executor() -> HermesExecutor:
+    """``state.executor``, narrowed to non-``None``.
+
+    It's only ``None`` before ``build()`` has run once, which never happens
+    while a page is actually being served -- this just gives callers a
+    non-Optional type instead of repeating the same assertion everywhere.
+    """
+    assert state.executor is not None, "web.build() must run before pages are served"
+    return state.executor
+
+
+def current_store() -> HermesStore:
+    """``sessions``/``cron``/``kanban`` reads and mutations for whichever
+    profile is active in this browser tab -- the one place plugin code
+    reaches for "the hermes daemon and profiles" instead of separately
+    pulling ``current_executor()`` and ``current_profile()`` at every call
+    site (see ``hermes_nicegui.store``).
+    """
+    return build_store(current_executor(), current_profile())
 
 
 class AppState:
@@ -40,6 +104,9 @@ class AppState:
     def __init__(self) -> None:
         self.settings: Settings | None = None
         self.client: HermesClient | None = None
+        self.executor: HermesExecutor | None = None
+        self.user_store: UserStore | None = None
+        self.profiles: list[str] = []
         self.plugins: list[Plugin] = []
         self.nav_items: list[NavItem] = []
         self.logger = _logger
@@ -48,13 +115,24 @@ class AppState:
 state = AppState()
 
 
-def build(context: PluginContext, plugins: list[Plugin] | None = None) -> AppState:
+def build(
+    context: PluginContext,
+    plugins: list[Plugin] | None = None,
+    profiles: list[str] | None = None,
+) -> AppState:
     """Register the home page and every plugin's pages against ``state``.
 
     ``plugins`` are already-constructed ``Plugin`` instances. Pass an
     explicit list to register exactly the plugins a test cares about; omit
     it (the production path, see ``hermes_nicegui.app``) to discover the
     installed set through the ``hermes_nicegui.plugins`` entry-point group.
+
+    ``profiles`` populates the profile switcher. It's a plain list rather
+    than something ``build`` fetches itself, since fetching it means running
+    ``hermes profile list`` (async, a subprocess) and ``build`` stays sync
+    so every existing test -- which calls it directly, synchronously -- is
+    unaffected; the real app fetches it in ``app.py``'s (async) startup
+    handler and passes it in.
 
     Safe to call more than once in the same process: state is reset before
     each build, which is what the test suite relies on -- NiceGUI's ``user``
@@ -63,6 +141,13 @@ def build(context: PluginContext, plugins: list[Plugin] | None = None) -> AppSta
     """
     state.settings = context.settings
     state.client = context.client
+    state.executor = context.executor
+    # Constructed unconditionally (cheap -- just opens/creates a small SQLite
+    # file) so `/login` works the same whether or not `AuthMiddleware` is
+    # installed; the middleware is only ever added in `app.py::main`, never
+    # here, so tests calling `build()` directly are never gated by it.
+    state.user_store = UserStore(context.settings.data_dir_path / "users.db")
+    state.profiles = profiles or []
     state.logger = context.logger
     state.plugins = plugins if plugins is not None else load_plugins(context)
     state.nav_items = []
@@ -78,6 +163,7 @@ def build(context: PluginContext, plugins: list[Plugin] | None = None) -> AppSta
                 state.nav_items.append(item)
 
     _register_home()
+    _register_login_page()
 
     state.logger.info(
         "hermes-nicegui ready: {} plugins, {} nav items",
@@ -85,6 +171,22 @@ def build(context: PluginContext, plugins: list[Plugin] | None = None) -> AppSta
         len(state.nav_items),
     )
     return state
+
+
+def _apply_theme() -> None:
+    """Brand colors + dark mode (follows ``state.settings.ui_dark``).
+
+    Shared between ``frame()`` and the login page -- the login page renders
+    before any plugin page (and outside ``frame()`` entirely, since it has
+    no nav drawer/profile switcher), but should still match the rest of the
+    app's theme rather than defaulting to light mode regardless of
+    ``HERMES_UI_DARK``.
+    """
+    ui.colors(primary="#4F46E5", secondary="#0EA5E9")
+    if state.settings and state.settings.ui_dark:
+        ui.dark_mode().enable()
+    else:
+        ui.dark_mode().disable()
 
 
 @contextmanager
@@ -95,11 +197,7 @@ def frame(*, active: str = "") -> Iterator[None]:
     stays consistent across modules. ``active`` highlights the current route.
     Dark mode follows ``state.settings.ui_dark``.
     """
-    ui.colors(primary="#4F46E5", secondary="#0EA5E9")
-    if state.settings and state.settings.ui_dark:
-        ui.dark_mode().enable()
-    else:
-        ui.dark_mode().disable()
+    _apply_theme()
     with ui.header():
         with ui.row().classes("items-center"):
             # `ui.button`'s `color` param sets Quasar's own `color` prop only
@@ -116,6 +214,24 @@ def frame(*, active: str = "") -> Iterator[None]:
             ui.icon("device_hub")
             ui.label("Hermes")
             ui.space()
+            if state.profiles:
+                ui.select(
+                    state.profiles,
+                    value=current_profile() or "default",
+                    on_change=lambda e: (set_current_profile(e.value), ui.navigate.reload()),
+                ).props("dense outlined dark options-dense").classes("text-white w-40").tooltip(
+                    "Active Hermes profile"
+                ).mark("profile-select")
+            if state.settings and state.settings.auth_enabled:
+                username = app.storage.user.get("username")
+                if username:
+                    ui.label(username).classes("text-white text-xs self-center q-mx-sm")
+                ui.button(
+                    icon="logout",
+                    on_click=lambda: (app.storage.user.clear(), ui.navigate.to("/login")),
+                ).props("flat round dense").classes("text-white").tooltip("Log out").mark(
+                    "logout-button"
+                )
 
     # `value` deliberately left unset: NiceGUI opens the drawer above the
     # 1024px breakpoint and collapses it to a toggleable overlay below it.
@@ -164,3 +280,79 @@ def _register_home() -> None:
                             if item.icon:
                                 ui.icon(item.icon)
                             ui.label(item.label)
+
+
+def _register_login_page() -> None:
+    """Single ``/login`` route: a first-run "create admin account" form when
+    no user exists yet (``UserStore.has_any_user``), a plain login form
+    otherwise. Deliberately no auth check of its own -- gating is
+    ``AuthMiddleware``'s job (``hermes_nicegui.auth``), not this page's; it
+    just needs to render and work regardless of whether that middleware is
+    installed, which is what keeps it testable via ``web.build()`` alone.
+    """
+
+    @ui.page("/login", title="Hermes — Log in")
+    async def login_page() -> None:
+        store = state.user_store
+        assert store is not None
+        _apply_theme()
+        first_run = not await asyncio.to_thread(store.has_any_user)
+
+        with ui.card().classes("absolute-center w-full max-w-sm"):
+            ui.label("Hermes").classes("text-lg font-bold")
+            ui.label("Create the admin account" if first_run else "Log in").classes(
+                "text-sm opacity-70 q-mb-sm"
+            )
+            username_input = (
+                ui.input("Username")
+                .props("outlined dense autofocus")
+                .classes("w-full")
+                .mark("login-username")
+            )
+            password_input = (
+                ui.input("Password", password=True, password_toggle_button=True)
+                .props("outlined dense")
+                .classes("w-full")
+                .mark("login-password")
+            )
+            confirm_input = (
+                ui.input("Confirm password", password=True, password_toggle_button=True)
+                .props("outlined dense")
+                .classes("w-full")
+                .mark("login-confirm-password")
+                if first_run
+                else None
+            )
+            error_label = ui.label("").classes("text-negative text-xs")
+
+            async def submit() -> None:
+                error_label.set_text("")
+                new_username = (username_input.value or "").strip()
+                password = password_input.value or ""
+                if not new_username or not password:
+                    error_label.set_text("Username and password are required")
+                    return
+                if first_run:
+                    if len(password) < 8:
+                        error_label.set_text("Password must be at least 8 characters")
+                        return
+                    if password != (confirm_input.value if confirm_input else ""):
+                        error_label.set_text("Passwords do not match")
+                        return
+                    await asyncio.to_thread(store.create_user, new_username, password)
+                    app.storage.user.update({"authenticated": True, "username": new_username})
+                    ui.navigate.to("/")
+                    return
+                ok = await asyncio.to_thread(store.verify, new_username, password)
+                if not ok:
+                    error_label.set_text("Invalid username or password")
+                    return
+                app.storage.user.update({"authenticated": True, "username": new_username})
+                ui.navigate.to("/")
+
+            password_input.on("keydown.enter", submit)
+            if confirm_input is not None:
+                confirm_input.on("keydown.enter", submit)
+            ui.button("Create account" if first_run else "Log in", on_click=submit).classes(
+                "w-full"
+            ).mark("login-submit")

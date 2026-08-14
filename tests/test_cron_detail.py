@@ -32,12 +32,13 @@ async def test_detail_page_has_yaml_tab(user: User, context: PluginContext) -> N
     assert user.find(marker="save-yaml-button").elements
 
 
-async def test_pause_resume_toggles(user: User, context: PluginContext) -> None:
+async def test_pause_resume_toggles(user: User, context: PluginContext, fake_hermes_cli) -> None:
     web.build(context, [CronPlugin(context)])
     await user.open(f"/cron/{JOB_ID}")
     await user.should_see("Pause")
     user.find(marker="pause-resume-button").click()
     await user.should_see("Resume", retries=10)
+    assert fake_hermes_cli.jobs_actions == [("cron", "pause", JOB_ID)]
 
 
 async def test_delete_navigates_to_list(user: User, context: PluginContext) -> None:

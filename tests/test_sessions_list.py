@@ -2,12 +2,62 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
+from typing import cast
+
+import httpx
+from loguru import logger
 from nicegui import ui
 from nicegui.testing import User
 
 from hermes_nicegui import web
+from hermes_nicegui.config import Settings
+from hermes_nicegui.executor import CompletedResult, HermesExecutor
+from hermes_nicegui.gateway import HermesClient
 from hermes_nicegui.plugin import PluginContext
 from hermes_nicegui.plugins.sessions import SessionsPlugin
+from tests.conftest import FakeHermes, FakeHermesCli
+
+
+async def test_slow_fetch_does_not_block_initial_response(
+    user: User, hermes: FakeHermes, tmp_path
+) -> None:
+    """A read slower than NiceGUI's own page `response_timeout` (default 3s)
+    must not 500 the page -- see `sessions/ui.py`'s
+    `await ui.context.client.connected()` guard before the fetch. Confirmed
+    against the real host: a 451-session `sessions export` (the old
+    CLI-subprocess read path) took ~11s, well past that 3s ceiling, and
+    *did* 500 before that guard was added -- direct SQLite reads are fast in
+    "local" mode (no subprocess at all), but a remote ("ssh") profile still
+    pays a real network round trip per read, so this fakes *that* path being
+    slow (`io_run_fn`) rather than the now-fast local one. The other tests
+    in this file use the (near-instant) fake CLI/local reads and so wouldn't
+    catch a regression here.
+    """
+
+    async def slow_io_run_fn(argv: list[str], input_text: str) -> CompletedResult:
+        await asyncio.sleep(3.5)
+        return CompletedResult(0, "[]", "")
+
+    executor = HermesExecutor(
+        mode="ssh",
+        ssh_target="hermes@host",
+        hermes_home="~/.hermes",
+        io_run_fn=slow_io_run_fn,
+    )
+    settings = Settings(
+        gateway_url="http://hermes.test", api_token="test-token", data_dir=str(tmp_path)
+    )
+    client = HermesClient(
+        settings.gateway_url, settings.api_token, transport=httpx.MockTransport(hermes.handle)
+    )
+    context = PluginContext(client=client, settings=settings, logger=logger, executor=executor)
+    web.build(context, [SessionsPlugin(context)])
+
+    start = time.monotonic()
+    await user.open("/sessions")  # must not raise (a 500 fails this assertion)
+    assert time.monotonic() - start < 3.0
 
 
 async def test_sessions_list_renders(user: User, context: PluginContext) -> None:
@@ -52,40 +102,48 @@ async def test_unread_filter_toggles(user: User, context: PluginContext) -> None
     await user.should_see("First session")
 
 
-async def test_new_session_button_navigates_to_new_session(
-    user: User, context: PluginContext
-) -> None:
+async def test_new_chat_button_navigates_to_chat_page(user: User, context: PluginContext) -> None:
     web.build(context, [SessionsPlugin(context)])
     await user.open("/sessions")
     await user.should_see("First session")
     user.find(marker="new-session-button").click()
-    await user.should_see("Message Hermes", retries=10)
-    assert user.find(marker="chat-input").elements
+    await user.should_see("Chat", retries=10)
+    assert user.find(marker="chat-terminal").elements
 
 
-async def test_new_session_button_reuses_existing_blank_session(
-    user: User, context: PluginContext, hermes
+async def test_list_paginates_with_numbered_pages(
+    user: User, context: PluginContext, fake_hermes_cli: FakeHermesCli
 ) -> None:
-    """Clicking "New session" when a blank session already exists should
-    reopen it instead of creating another one -- there should only ever be
-    one blank session at a time."""
-    hermes.sessions.append(
-        {
-            "id": "sess-blank",
-            "title": None,
-            "source": "webui",
-            "message_count": 0,
-            "last_active": 1786630000.0,
-            "preview": None,
-        }
-    )
+    """More than one page of sessions must not all mount as DOM rows up
+    front -- see `sessions/ui.py::render_rows`. A numbered page control
+    appears instead, and switching pages fetches the next batch server-side
+    (offset/limit), replacing rather than appending to the current page."""
+    for i in range(40):
+        fake_hermes_cli.insert_session(
+            {
+                "id": f"sess-extra-{i}",
+                "title": f"Extra session {i}",
+                "source": "webui",
+                "model": "deepseek-v4-flash",
+                "message_count": 1,
+                "tool_call_count": 0,
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "estimated_cost_usd": 0.0,
+                "last_activity_at": 1786620000.0 - i,
+                "pinned": 0,
+                "archived": 0,
+            }
+        )
     web.build(context, [SessionsPlugin(context)])
     await user.open("/sessions")
     await user.should_see("First session")
-    before = len(hermes.sessions)
-    user.find(marker="new-session-button").click()
-    await user.should_see("Message Hermes", retries=10)
-    assert len(hermes.sessions) == before
+    assert len(user.find(marker="session-row").elements) == 30
+    pager = cast(ui.pagination, next(iter(user.find(marker="page-control").elements)))
+    pager.set_value(2)
+    await user.should_see("Extra session 35", retries=10)
+    assert len(user.find(marker="session-row").elements) == 12
+    await user.should_not_see("First session", retries=10)
 
 
 async def test_search_filters_list(user: User, context: PluginContext) -> None:

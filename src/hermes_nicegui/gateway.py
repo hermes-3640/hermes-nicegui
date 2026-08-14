@@ -123,6 +123,122 @@ class Job:
 
 
 @dataclass
+class Task:
+    """A kanban task. ``raw`` keeps the full record for anything not
+    modelled here. Shared between the dashboard REST client
+    (``plugins/kanban/gateway.py::KanbanClient``, still used for kanban
+    *writes*) and direct SQLite reads (``hermes_nicegui.store.KanbanStore``)
+    -- lives in core ``gateway.py`` (alongside ``Job``, cron's own
+    dataclass) rather than under ``plugins/kanban/`` so both can use it
+    without a plugin-to-plugin or core-to-plugin import.
+    """
+
+    id: str
+    title: str
+    status: str
+    body: str | None = None
+    assignee: str | None = None
+    priority: int | None = None
+    tenant: str | None = None
+    created_at: float | None = None
+    started_at: float | None = None
+    completed_at: float | None = None
+    consecutive_failures: int = 0
+    last_failure_error: str | None = None
+    current_run_id: str | None = None
+    session_id: str | None = None
+    latest_summary: str | None = None
+    comment_count: int = 0
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> Task:
+        return cls(
+            id=data["id"],
+            title=data.get("title") or "",
+            status=data.get("status") or "",
+            body=data.get("body"),
+            assignee=data.get("assignee"),
+            priority=data.get("priority"),
+            tenant=data.get("tenant"),
+            created_at=data.get("created_at"),
+            started_at=data.get("started_at"),
+            completed_at=data.get("completed_at"),
+            consecutive_failures=data.get("consecutive_failures", 0),
+            last_failure_error=data.get("last_failure_error"),
+            current_run_id=data.get("current_run_id"),
+            session_id=data.get("session_id"),
+            latest_summary=data.get("latest_summary"),
+            comment_count=data.get("comment_count", 0),
+            raw=data,
+        )
+
+
+@dataclass
+class BoardColumn:
+    name: str
+    tasks: list[Task] = field(default_factory=list)
+
+
+@dataclass
+class Board:
+    columns: list[BoardColumn] = field(default_factory=list)
+    assignees: list[str] = field(default_factory=list)
+    tenants: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> Board:
+        return cls(
+            columns=[
+                BoardColumn(
+                    name=column["name"],
+                    tasks=[Task.from_json(t) for t in column.get("tasks", [])],
+                )
+                for column in data.get("columns", [])
+            ],
+            assignees=data.get("assignees") or [],
+            tenants=data.get("tenants") or [],
+        )
+
+
+@dataclass
+class Comment:
+    id: Any
+    body: str
+    author: str | None = None
+    created_at: float | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> Comment:
+        return cls(
+            id=data.get("id"),
+            body=data.get("body") or "",
+            author=data.get("author") or data.get("created_by"),
+            created_at=data.get("created_at"),
+            raw=data,
+        )
+
+
+@dataclass
+class TaskDetail:
+    task: Task
+    comments: list[Comment] = field(default_factory=list)
+    # Left as raw dicts (not a modelled dataclass) -- the run/event schema
+    # varies by outcome (running/done/blocked/crashed/...), so this stays
+    # defensive rather than guessing a fixed field set.
+    runs: list[dict[str, Any]] = field(default_factory=list)
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> TaskDetail:
+        return cls(
+            task=Task.from_json(data["task"]),
+            comments=[Comment.from_json(c) for c in data.get("comments", [])],
+            runs=data.get("runs") or [],
+        )
+
+
+@dataclass
 class Message:
     """A message in a session transcript."""
 
