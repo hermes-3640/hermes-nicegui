@@ -100,4 +100,6 @@ class Settings(BaseSettings):
         return {
             "base_url": self.gateway_url,
             "token": self.api_token,
+            "default_model": self.default_model,
+            "default_provider": self.default_provider,
         }
