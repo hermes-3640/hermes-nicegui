@@ -34,9 +34,11 @@ any environment variable — see Testing below.
   non-web frontend.
 - `src/hermes_nicegui/config.py` — `Settings` (pydantic-settings, `HERMES_`
   env prefix).
-- `src/hermes_nicegui/plugins/<name>/` — one subpackage per plugin. Currently
-  just `sessions`. `ui.py` is NiceGUI wiring; `logic.py` is pure functions
-  pulled out of it so they're unit-testable with no browser.
+- `src/hermes_nicegui/plugins/<name>/` — one subpackage per plugin:
+  `sessions` (browse sessions + live chat) and `cron` (list/create/edit
+  scheduled jobs against the gateway's `/api/jobs`). `ui.py` is NiceGUI
+  wiring; `logic.py` is pure functions pulled out of it so they're
+  unit-testable with no browser.
 
 ## Rules that differ from defaults
 
@@ -103,7 +105,21 @@ any environment variable — see Testing below.
 - **`_unread_state()` can raise `RuntimeError`** if `app.storage.user` isn't
   available (storage disabled in some test/embedding setups) — it's caught
   and falls back to an empty dict rather than crashing the page.
-- **No `chat` plugin exists yet.** `HermesClient.stream_turn`/`chat_turn` are
-  implemented and tested (`tests/test_gateway.py`), but there is no page for
-  them. Don't trust a docs mention of "chat" as a plugin without checking
-  `src/hermes_nicegui/plugins/` first.
+- **The `/api/jobs` cron schema isn't documented anywhere client-facing** —
+  the Hermes Agent website's cron docs cover the CLI/dashboard surface
+  (`/api/cron/jobs`), a *different* route tree owned by the CLI's own web
+  server, not the gateway. `Job`/`HermesClient.*_job*` in `gateway.py` were
+  reverse-engineered from the gateway source itself
+  (`gateway/platforms/api_server.py::_handle_*_job`, `cron/jobs.py::create_job`
+  in the `NousResearch/hermes-agent` repo) — check those files, not the
+  docs site, before changing the job field set.
+- **Live chat lives on the session detail page**, not a separate `chat`
+  plugin (`session_detail_page` in `plugins/sessions/ui.py`). Sending a
+  message renders the user turn and the streaming reply straight into the
+  existing transcript timeline (`assistant.delta` appends to a live
+  `ui.markdown`), then re-fetches `.../messages` once the turn finishes so
+  the transcript reflects the server's canonical record (correctly fused
+  tool calls/reasoning, accurate message counts) instead of the
+  best-effort live rendering. `tests/conftest.py::FakeHermes._record_turn`
+  mimics the server persisting a turn so this reload has something to fetch
+  in tests.

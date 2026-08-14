@@ -75,6 +75,54 @@ class Session:
 
 
 @dataclass
+class Job:
+    """A cron job (from ``GET /api/jobs``), as returned by the gateway's
+    ``api_server`` platform adapter (``gateway/platforms/api_server.py`` in
+    the Hermes Agent repo). ``raw`` keeps the full record so a UI can offer
+    lossless raw-YAML editing on top of the fields modelled here.
+    """
+
+    id: str
+    name: str
+    schedule_display: str
+    prompt: str | None = None
+    deliver: str | None = None
+    skills: list[str] = field(default_factory=list)
+    repeat_times: int | None = None
+    repeat_completed: int = 0
+    enabled: bool = True
+    state: str | None = None
+    next_run_at: str | None = None
+    last_run_at: str | None = None
+    last_status: str | None = None
+    last_error: str | None = None
+    created_at: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> Job:
+        repeat = data.get("repeat") or {}
+        return cls(
+            id=data["id"],
+            name=data.get("name") or "",
+            schedule_display=data.get("schedule_display") or "",
+            prompt=data.get("prompt"),
+            deliver=data.get("deliver"),
+            skills=data.get("skills") or [],
+            repeat_times=repeat.get("times"),
+            repeat_completed=repeat.get("completed", 0),
+            enabled=data.get("enabled", True),
+            state=data.get("state"),
+            next_run_at=data.get("next_run_at"),
+            last_run_at=data.get("last_run_at"),
+            last_status=data.get("last_status"),
+            last_error=data.get("last_error"),
+            created_at=data.get("created_at"),
+            raw=data,
+        )
+
+
+@dataclass
 class Message:
     """A message in a session transcript."""
 
@@ -290,6 +338,60 @@ class HermesClient:
             params={"limit": limit, "offset": offset},
         )
         return [Message.from_json(m) for m in data.get("data", [])]
+
+    # -- cron jobs ----------------------------------------------------------
+
+    async def list_jobs(self, *, include_disabled: bool = True) -> list[Job]:
+        data = await self._request(
+            "GET", "/api/jobs", params={"include_disabled": include_disabled}
+        )
+        return [Job.from_json(j) for j in data.get("jobs", [])]
+
+    async def create_job(
+        self,
+        *,
+        name: str,
+        schedule: str,
+        prompt: str = "",
+        deliver: str | None = None,
+        skills: list[str] | None = None,
+        repeat: int | None = None,
+    ) -> Job:
+        body: dict[str, Any] = {"name": name, "schedule": schedule, "prompt": prompt}
+        if deliver:
+            body["deliver"] = deliver
+        if skills:
+            body["skills"] = skills
+        if repeat is not None:
+            body["repeat"] = repeat
+        data = await self._request("POST", "/api/jobs", json=body)
+        return Job.from_json(data["job"])
+
+    async def get_job(self, job_id: str) -> Job:
+        data = await self._request("GET", f"/api/jobs/{job_id}")
+        return Job.from_json(data["job"])
+
+    async def update_job(self, job_id: str, fields: dict[str, Any]) -> Job:
+        """PATCH a job. ``fields`` may hold any subset of the job's editable
+        keys -- the gateway silently drops anything it doesn't recognize."""
+        data = await self._request("PATCH", f"/api/jobs/{job_id}", json=fields)
+        return Job.from_json(data["job"])
+
+    async def delete_job(self, job_id: str) -> bool:
+        await self._request("DELETE", f"/api/jobs/{job_id}")
+        return True
+
+    async def pause_job(self, job_id: str) -> Job:
+        data = await self._request("POST", f"/api/jobs/{job_id}/pause")
+        return Job.from_json(data["job"])
+
+    async def resume_job(self, job_id: str) -> Job:
+        data = await self._request("POST", f"/api/jobs/{job_id}/resume")
+        return Job.from_json(data["job"])
+
+    async def run_job(self, job_id: str) -> Job:
+        data = await self._request("POST", f"/api/jobs/{job_id}/run")
+        return Job.from_json(data["job"])
 
     # -- chat --------------------------------------------------------------
 

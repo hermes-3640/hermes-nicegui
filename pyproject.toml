@@ -17,6 +17,7 @@ hermes-nicegui = "hermes_nicegui.app:main"
 
 [project.entry-points."hermes_nicegui.plugins"]
 sessions = "hermes_nicegui.plugins.sessions:SessionsPlugin"
+cron = "hermes_nicegui.plugins.cron:CronPlugin"
 
 [build-system]
 requires = ["hatchling"]

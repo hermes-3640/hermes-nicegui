@@ -30,6 +30,7 @@ class FakeHermes:
         self.sessions: list[dict] = []
         self.messages: dict[str, list[dict]] = {}
         self.stream_events: list[tuple[str, dict]] = []
+        self.jobs: list[dict] = []
         self.reset()
 
     def reset(self) -> None:
@@ -97,6 +98,24 @@ class FakeHermes:
                 },
             ]
         }
+        self.jobs = [
+            {
+                "id": "aabbccddeeff",
+                "name": "Nightly report",
+                "prompt": "Summarize yesterday's activity",
+                "schedule_display": "0 3 * * *",
+                "deliver": "local",
+                "skills": [],
+                "repeat": {"times": None, "completed": 5},
+                "enabled": True,
+                "state": "scheduled",
+                "created_at": "2026-08-01T00:00:00+00:00",
+                "next_run_at": "2026-08-14T03:00:00+00:00",
+                "last_run_at": "2026-08-13T03:00:00+00:00",
+                "last_status": "success",
+                "last_error": None,
+            }
+        ]
         self.stream_events = [
             ("run.started", {"session_id": "sess-1", "run_id": "run_1"}),
             ("message.started", {"message": {"id": "msg_1", "role": "assistant"}}),
@@ -131,8 +150,12 @@ class FakeHermes:
             }
             self.sessions.append(session)
             return self._json({"object": "hermes.session", "session": session})
-        if method == "GET" and path == "/api/sessions/sess-1":
-            return self._json({"object": "hermes.session", "session": self.sessions[0]})
+        if method == "GET" and path.startswith("/api/sessions/") and path.count("/") == 3:
+            sid = path.split("/")[3]
+            session = next((s for s in self.sessions if s["id"] == sid), None)
+            if not session:
+                return self._json({"error": "Session not found"}, status=404)
+            return self._json({"object": "hermes.session", "session": session})
         if method == "GET" and path.startswith("/api/sessions/") and path.endswith("/messages"):
             sid = path.split("/")[3]
             return self._json({"object": "list", "data": self.messages.get(sid, [])})
@@ -140,14 +163,123 @@ class FakeHermes:
             return self._json({"model_lock": "accepted"})
         if method == "POST" and path == "/api/sessions/sess-1/fork":
             new_id = "sess-fork"
-            return self._json(
-                {"object": "hermes.session", "session": {"id": new_id, "title": "forked"}}
-            )
+            session = {"id": new_id, "title": "forked", "source": "webui"}
+            self.sessions.append(session)
+            return self._json({"object": "hermes.session", "session": session})
         if method == "DELETE" and path == "/api/sessions/sess-1":
             return self._json({"deleted": True})
         if method == "POST" and path.endswith("/chat/stream"):
+            sid = path.split("/")[3]
+            body = json.loads(request.content) if request.content else {}
+            self._record_turn(sid, body.get("input", ""))
             return self._sse(self.stream_events)
+        if method == "GET" and path == "/api/jobs":
+            return self._json({"jobs": self.jobs})
+        if method == "POST" and path == "/api/jobs":
+            body = json.loads(request.content) if request.content else {}
+            job = {
+                "id": "112233445566",
+                "name": body.get("name", ""),
+                "prompt": body.get("prompt", ""),
+                "schedule_display": body.get("schedule", ""),
+                "deliver": body.get("deliver") or "local",
+                "skills": body.get("skills") or [],
+                "repeat": {"times": body.get("repeat"), "completed": 0},
+                "enabled": True,
+                "state": "scheduled",
+                "created_at": "2026-08-13T00:00:00+00:00",
+                "next_run_at": "2026-08-14T00:00:00+00:00",
+                "last_run_at": None,
+                "last_status": None,
+                "last_error": None,
+            }
+            self.jobs.append(job)
+            return self._json({"job": job})
+        if path.startswith("/api/jobs/"):
+            parts = path.split("/")
+            job_id = parts[3]
+            job = next((j for j in self.jobs if j["id"] == job_id), None)
+            action = parts[4] if len(parts) > 4 else None
+            if method == "GET" and action is None:
+                if not job:
+                    return self._json({"error": "Job not found"}, status=404)
+                return self._json({"job": job})
+            if method == "PATCH" and action is None:
+                if not job:
+                    return self._json({"error": "Job not found"}, status=404)
+                body = json.loads(request.content) if request.content else {}
+                if "schedule" in body:
+                    body["schedule_display"] = body.pop("schedule")
+                if "repeat" in body:
+                    body["repeat"] = {
+                        "times": body["repeat"],
+                        "completed": job["repeat"]["completed"],
+                    }
+                job.update(body)
+                return self._json({"job": job})
+            if method == "DELETE" and action is None:
+                if not job:
+                    return self._json({"error": "Job not found"}, status=404)
+                self.jobs.remove(job)
+                return self._json({"ok": True})
+            if method == "POST" and action == "pause":
+                if not job:
+                    return self._json({"error": "Job not found"}, status=404)
+                job["enabled"] = False
+                job["state"] = "paused"
+                return self._json({"job": job})
+            if method == "POST" and action == "resume":
+                if not job:
+                    return self._json({"error": "Job not found"}, status=404)
+                job["enabled"] = True
+                job["state"] = "scheduled"
+                return self._json({"job": job})
+            if method == "POST" and action == "run":
+                if not job:
+                    return self._json({"error": "Job not found"}, status=404)
+                job["last_run_at"] = "2026-08-13T12:00:00+00:00"
+                job["last_status"] = "success"
+                return self._json({"job": job})
         return self._json({"error": {"message": f"unhandled {method} {path}"}}, status=404)
+
+    def _record_turn(self, session_id: str, input_text: str) -> None:
+        """Append a user + assistant message, mimicking what a real Hermes
+        server does when a ``/chat/stream`` turn completes -- needed so a
+        follow-up ``GET .../messages`` (the reload after a live chat send)
+        reflects the turn instead of silently dropping it.
+        """
+        final_content = next(
+            (
+                data.get("content", "")
+                for name, data in self.stream_events
+                if name == "assistant.completed"
+            ),
+            "",
+        )
+        history = self.messages.setdefault(session_id, [])
+        next_id = max((m["id"] for m in history), default=0) + 1
+        history.append(
+            {
+                "id": next_id,
+                "session_id": session_id,
+                "role": "user",
+                "content": input_text,
+                "timestamp": 1786620020.0,
+            }
+        )
+        history.append(
+            {
+                "id": next_id + 1,
+                "session_id": session_id,
+                "role": "assistant",
+                "content": final_content,
+                "timestamp": 1786620021.0,
+            }
+        )
+        for session in self.sessions:
+            if session["id"] == session_id:
+                session["message_count"] = session.get("message_count", 0) + 2
+                break
 
     def _json(self, payload: dict, status: int = 200) -> httpx.Response:
         return httpx.Response(status, json=payload, headers={"Content-Type": "application/json"})

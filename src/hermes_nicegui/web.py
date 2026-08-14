@@ -88,7 +88,7 @@ def build(context: PluginContext, plugins: list[Plugin] | None = None) -> AppSta
 
 
 @contextmanager
-def frame(title: str, *, active: str = "") -> Iterator[None]:
+def frame(*, active: str = "") -> Iterator[None]:
     """Shared page frame: header + left nav drawer + content column.
 
     Every plugin page wraps its content in ``with frame(...):`` so the shell
@@ -102,11 +102,19 @@ def frame(title: str, *, active: str = "") -> Iterator[None]:
         ui.dark_mode().disable()
     with ui.header():
         with ui.row().classes("items-center"):
-            ui.button(icon="menu", on_click=lambda: drawer.toggle()).props("flat round dense")
+            # `ui.button`'s `color` param sets Quasar's own `color` prop only
+            # for its whitelisted Quasar/Tailwind color names; "white" isn't
+            # one, so it falls back to an inline `background-color: white`
+            # style instead -- a solid white circle behind the icon (`round`),
+            # not the flat white icon a `flat` button implies. A `text-white`
+            # class sets the icon's color directly with no background at all.
+            # The default `color` is 'primary', which on this already
+            # primary-colored header made the icon blend into invisibility.
+            ui.button(icon="menu", on_click=lambda: drawer.toggle()).props(
+                "flat round dense"
+            ).classes("text-white")
             ui.icon("device_hub")
             ui.label("Hermes")
-            ui.space()
-            ui.label(title)
             ui.space()
 
     # `value` deliberately left unset: NiceGUI opens the drawer above the
@@ -114,17 +122,28 @@ def frame(title: str, *, active: str = "") -> Iterator[None]:
     # Forcing `value=True` (the old code) defeated that and squeezed every
     # page's content into a sliver next to a permanently-open drawer on
     # phone-width screens.
-    drawer = ui.left_drawer(fixed=False)
-    with drawer, ui.list().props("dense"):
+    #
+    # `fixed=True` pins the drawer to the viewport as its own scroll
+    # region, independent of the page content -- with the default
+    # `fixed=False` the drawer sits in normal document flow and scrolls
+    # away with the page on a long transcript.
+    drawer = ui.left_drawer(fixed=True)
+    with drawer:
         for item in state.nav_items:
-            with ui.item(on_click=partial(ui.navigate.to, item.route)).props(
-                "v-ripple" + (" active active-class=text-primary" if item.route == active else "")
-            ):
-                with ui.item_section().props("avatar"):
-                    if item.icon:
-                        ui.icon(item.icon)
-                with ui.item_section():
-                    ui.item_label(item.label)
+            # A flat, full-width button rather than a ``ui.list``/``ui.item``:
+            # the drawer's own default CSS is a flex column with
+            # `align-items: flex-start` (see `.nicegui-drawer` in NiceGUI's
+            # stylesheet), so a plain item shrinks to its label's width
+            # instead of filling the drawer -- most of the row then looks
+            # like empty drawer background but isn't actually clickable.
+            # `w-full` + `justify-start` makes the whole row both look and
+            # behave like the nav entry it is.
+            ui.button(
+                item.label,
+                icon=item.icon,
+                color="primary" if item.route == active else None,
+                on_click=partial(ui.navigate.to, item.route),
+            ).props("flat no-caps align=left").classes("w-full justify-start")
 
     with ui.column().classes("w-full"):
         yield
@@ -135,7 +154,7 @@ def _register_home() -> None:
 
     @ui.page("/", title="Hermes")
     def home_page() -> None:
-        with frame("Home"):
+        with frame():
             ui.label("Hermes NiceGUI")
             ui.label("Modular web UI for the Hermes Agent gateway.")
             with ui.row():

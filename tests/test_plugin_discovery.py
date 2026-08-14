@@ -17,6 +17,7 @@ from hermes_nicegui.plugin import PluginContext
 
 async def test_discovers_installed_plugins(user: User, context: PluginContext) -> None:
     state = web.build(context)
-    assert {p.name for p in state.plugins} == {"sessions"}
+    assert {p.name for p in state.plugins} == {"sessions", "cron"}
     await user.open("/")
     await user.should_see("Sessions")
+    await user.should_see("Cron Jobs")

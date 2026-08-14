@@ -122,14 +122,45 @@ def _collapsible_entry(
                 render_body()
 
 
-def _chat_bubble(icon: str, color: str, sender: str, content: str, timestamp: float | None) -> None:
-    """A visible chat message -- something the user or Hermes actually said."""
+def _scroll_to_bottom(anchor: ui.element) -> None:
+    """Keep the newest content in view as a live turn grows the page.
+
+    Targets both plain ``window`` scroll and Quasar's own
+    ``.q-page-container`` scroll region, since which one actually owns the
+    scrollbar depends on layout/viewport and there's no cheap way to ask.
+
+    ``anchor`` must be an element belonging to the page's own client --
+    ``ui.run_javascript`` resolves *which* browser client to send the script
+    to from the current slot stack, which a background task (this always
+    runs from one -- see ``background_tasks.create(send())``) starts out
+    with none of, unlike a normal page-request task.
+    """
+    with anchor:
+        ui.run_javascript(
+            "window.scrollTo(0, document.body.scrollHeight);"
+            "document.querySelectorAll('.q-page-container').forEach("
+            "el => el.scrollTop = el.scrollHeight);"
+        )
+
+
+def _chat_bubble_shell(icon: str, color: str, sender: str, timestamp: float | None) -> ui.markdown:
+    """Build a chat bubble's entry+card shell and return its markdown body.
+
+    Split out from :func:`_chat_bubble` so a live-streamed reply can build
+    the same shell once and keep updating the markdown's content as deltas
+    arrive, instead of re-rendering a whole new bubble per token.
+    """
     entry = ui.timeline_entry(icon=icon, color=color)
     _icon_tooltip(entry, timestamp)
     with entry.add_slot("subtitle"):
         ui.label(sender).classes("text-xs font-bold w-full")
     with entry, ui.card().props("flat bordered").classes("w-fit max-w-full q-mt-xs q-mb-md"):
-        ui.markdown(content)
+        return ui.markdown()
+
+
+def _chat_bubble(icon: str, color: str, sender: str, content: str, timestamp: float | None) -> None:
+    """A visible chat message -- something the user or Hermes actually said."""
+    _chat_bubble_shell(icon, color, sender, timestamp).set_content(content)
 
 
 def _step(icon: str, color: str, text: str, timestamp: float | None, *, mono: bool = False) -> None:
@@ -226,20 +257,52 @@ def register_pages(plugin: Plugin) -> None:
     def _mark_read(session_id: str) -> None:
         _unread_state()[session_id] = datetime.now().timestamp()
 
-    async def render_transcript(container: ui.element, session_id: str) -> None:
-        """Render a session's messages into ``container`` as an event timeline."""
+    async def render_transcript(container: ui.element, session_id: str) -> ui.timeline | None:
+        """Render a session's messages into ``container`` as an event timeline.
+
+        Returns the ``ui.timeline`` element (or ``None`` if there was nothing
+        to show) so a live chat turn can append its own entries to the same
+        timeline instead of only being able to replace the whole container.
+        """
         container.clear()
         with container:
             try:
                 messages = await client.session_messages(session_id, limit=200)
             except HermesError as exc:
                 ui.label(f"Failed to load messages: {exc}")
-                return
+                return None
             if not messages:
                 ui.label("No messages yet.")
-                return
-            with ui.timeline(layout="dense").classes("w-full"):
+                return None
+            with ui.timeline(layout="dense").classes("w-full") as timeline:
                 render_transcript_events(messages)
+            return timeline
+
+    def _run_in_client(coro_factory: Callable[[], Any]) -> None:
+        """Schedule an async handler as a background task, but re-enter the
+        calling client's slot context inside that task first.
+
+        ``ui.notify``/``ui.navigate.to`` resolve the current *client* from
+        the calling asyncio task's own slot stack (see ``nicegui.context``).
+        A plain ``background_tasks.create(coro)`` spawns a genuinely new task
+        with an empty stack, so both silently no-op there (the resulting
+        ``RuntimeError`` is swallowed by the task's own exception handler) --
+        this is why "click Fork/Delete/New session" appeared to do the
+        network call but never notified or navigated. Capturing the client
+        here, while still in the click handler's own task (which does have a
+        stack), and re-entering it with ``with page_client:`` inside the
+        task mirrors what NiceGUI itself does for a plain ``async def``
+        event handler (see ``events.handle_event``'s
+        ``_await_and_handle_in_context``).
+        """
+        page_client = ui.context.client
+        coro = coro_factory()
+
+        async def run() -> None:
+            with page_client:
+                await coro
+
+        background_tasks.create(run())
 
     def _rename(session_id: str, new_title: str, on_renamed: Callable[[], Any] | None) -> None:
         async def do_rename() -> None:
@@ -254,7 +317,7 @@ def register_pages(plugin: Plugin) -> None:
             if on_renamed:
                 on_renamed()
 
-        background_tasks.create(do_rename())
+        _run_in_client(do_rename)
 
     def _fork(session_id: str) -> None:
         async def do_fork() -> None:
@@ -266,7 +329,18 @@ def register_pages(plugin: Plugin) -> None:
             ui.notify("Forked session", type="positive")
             ui.navigate.to(f"/sessions/{new.id}")
 
-        background_tasks.create(do_fork())
+        _run_in_client(do_fork)
+
+    def _new_session() -> None:
+        async def do_create() -> None:
+            try:
+                session = await client.create_session()
+            except HermesError as exc:
+                ui.notify(f"Failed to start session: {exc}", type="negative")
+                return
+            ui.navigate.to(f"/sessions/{session.id}")
+
+        _run_in_client(do_create)
 
     def _delete(session_id: str, on_deleted: Callable[[], Any] | None) -> None:
         async def do_delete() -> None:
@@ -280,11 +354,11 @@ def register_pages(plugin: Plugin) -> None:
             if on_deleted:
                 on_deleted()
 
-        background_tasks.create(do_delete())
+        _run_in_client(do_delete)
 
     @ui.page("/sessions", title="Sessions")
     async def sessions_page() -> None:
-        with frame("Sessions", active="/sessions"):
+        with frame(active="/sessions"):
             with ui.row().classes("w-full items-center gap-2"):
                 search = (
                     ui.input(placeholder="Search")
@@ -297,6 +371,9 @@ def register_pages(plugin: Plugin) -> None:
                 ui.button(
                     icon="refresh", on_click=lambda: background_tasks.create(load_list())
                 ).props("flat round dense").mark("refresh-button").tooltip("Refresh")
+                ui.button("New session", icon="add", on_click=_new_session).props(
+                    "unelevated"
+                ).mark("new-session-button")
 
             list_container = ui.list().props("separator").classes("w-full")
 
@@ -345,7 +422,7 @@ def register_pages(plugin: Plugin) -> None:
     @ui.page("/sessions/{session_id}", title="Session")
     async def session_detail_page(session_id: str) -> None:
         ui.add_css(_TIMELINE_CSS)
-        with frame("Session", active="/sessions"):
+        with frame(active="/sessions"):
             try:
                 session = await client.get_session(session_id)
             except HermesError as exc:
@@ -353,17 +430,20 @@ def register_pages(plugin: Plugin) -> None:
                 return
             _mark_read(session_id)
 
+            def _stats_text() -> str:
+                return (
+                    f"ID {session.id} · {session.message_count} messages · "
+                    f"{session.tool_call_count} tool calls · "
+                    f"cost {fmt_cost(session.estimated_cost_usd)}"
+                )
+
             with ui.card():
                 with ui.row():
                     ui.label(session.title or session.id)
                     ui.space()
                     ui.badge(session.source or "unknown", color="grey")
                     ui.badge(session.model or "no model", color="primary")
-                ui.label(
-                    f"ID {session.id} · {session.message_count} messages · "
-                    f"{session.tool_call_count} tool calls · "
-                    f"cost {fmt_cost(session.estimated_cost_usd)}"
-                )
+                stats_label = ui.label(_stats_text())
                 with ui.row():
                     ui.input(
                         "Rename",
@@ -379,5 +459,89 @@ def register_pages(plugin: Plugin) -> None:
                     )
 
             transcript = ui.column().classes("w-full")
-            await render_transcript(transcript, session_id)
+            timeline = await render_transcript(transcript, session_id)
+            _scroll_to_bottom(transcript)
+
+            def _timeline() -> ui.timeline:
+                """The transcript's live timeline, creating an empty one the
+                first time a chat turn is sent to a session with no history
+                yet (``render_transcript`` returns ``None`` there since it
+                has nothing of its own to show)."""
+                nonlocal timeline
+                if timeline is None:
+                    transcript.clear()
+                    with transcript:
+                        timeline = ui.timeline(layout="dense").classes("w-full")
+                return timeline
+
+            async def send() -> None:
+                nonlocal session, timeline
+                text = (message_input.value or "").strip()
+                if not text:
+                    return
+                message_input.set_value("")
+                message_input.disable()
+                send_button.disable()
+                try:
+                    with _timeline():
+                        _chat_bubble("person", "primary", "You", text, datetime.now().timestamp())
+                        with ui.row().classes(
+                            "items-center gap-2 text-xs opacity-60 q-mb-sm"
+                        ) as status_row:
+                            ui.spinner(size="1em")
+                            status_label = ui.label("Thinking…")
+                        reply_markdown = _chat_bubble_shell(
+                            "smart_toy", "secondary", "Hermes", None
+                        )
+                    _scroll_to_bottom(transcript)
+                    content = ""
+                    try:
+                        async for event in client.stream_turn(
+                            session_id, text, model=session.model
+                        ):
+                            if event.event == "tool.progress":
+                                name = event.data.get("tool_name", "tool")
+                                delta = oneline(event.data.get("delta", ""), limit=60)
+                                status_label.set_text(f"{name}: {delta}" if delta else name)
+                            elif event.event == "assistant.delta":
+                                status_row.set_visibility(False)
+                                content += event.data.get("delta", "")
+                                reply_markdown.set_content(content)
+                            elif event.event == "assistant.completed":
+                                status_row.set_visibility(False)
+                                content = event.data.get("content", content)
+                                reply_markdown.set_content(content)
+                            _scroll_to_bottom(transcript)
+                    except HermesError as exc:
+                        status_row.set_visibility(False)
+                        ui.notify(f"Message failed: {exc}", type="negative")
+                finally:
+                    message_input.enable()
+                    send_button.enable()
+                    message_input.run_method("focus")
+
+                timeline = await render_transcript(transcript, session_id)
+                _scroll_to_bottom(transcript)
+                try:
+                    session = await client.get_session(session_id)
+                except HermesError:
+                    pass
+                else:
+                    stats_label.set_text(_stats_text())
+
+            with ui.card().classes("w-full sticky bottom-0 z-10"):
+                with ui.row().classes("w-full items-center gap-2"):
+                    message_input = (
+                        ui.input(placeholder="Message Hermes…")
+                        .props("outlined dense autofocus")
+                        .classes("flex-grow")
+                        .on("keydown.enter", lambda: _run_in_client(send))
+                        .mark("chat-input")
+                    )
+                    send_button = (
+                        ui.button(icon="send", on_click=lambda: _run_in_client(send))
+                        .props("round dense")
+                        .mark("chat-send")
+                    )
+
             logger.debug("session detail rendered for {}", session_id)

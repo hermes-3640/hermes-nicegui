@@ -85,12 +85,10 @@ installed with `uv add` and is discovered automatically.
 
 Current plugins:
 
-- `sessions` — paginated session list, message history, rename / fork / delete
-
-> There is no `chat` plugin yet — streaming chat against `HermesClient.stream_turn`
-> is implemented in the gateway client but has no page. If you're looking for
-> it, it doesn't exist; this note exists so that claim doesn't quietly go
-> stale again.
+- `sessions` — paginated session list, message history, rename / fork /
+  delete, and a live chat box on the session detail page (streams replies
+  via `HermesClient.stream_turn`, then reconciles with the server's own
+  transcript once the turn completes)
 
 ## Testing
 
