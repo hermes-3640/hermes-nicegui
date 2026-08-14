@@ -24,14 +24,14 @@ JSON request over stdin, replying with a JSON value on stdout) -- no new
 remote dependency, and no shell-escaping of the query/path since nothing is
 interpolated into the script text itself.
 
-The CLI-subprocess argv-building path (`argv`) serves the interactive chat
-pty (`plugins/sessions/ui.py`) and one-shot mutations (`run`) alike, but only
-the former passes `tty=True`. Forcing a remote pty (`ssh -tt`) on a one-shot,
+The CLI-subprocess argv-building path (`argv`) serves interactive pty
+commands and one-shot mutations (`run`) alike, but only the former should
+pass `tty=True`. Forcing a remote pty (`ssh -tt`) on a one-shot,
 non-interactive command hangs indefinitely -- confirmed against the real
 host: `hermes sessions export ...` over `ssh -tt` never returns, while the
 identical command over plain `ssh` completes in well under a second. `-tt`
-is only for `hermes chat`, which genuinely needs a remote tty for its own
-readline/cursor handling.
+is only for genuinely interactive commands like `hermes chat`, which need a
+remote tty for their own readline/cursor handling.
 """
 
 from __future__ import annotations

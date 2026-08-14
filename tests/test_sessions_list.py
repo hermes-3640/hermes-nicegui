@@ -102,13 +102,15 @@ async def test_unread_filter_toggles(user: User, context: PluginContext) -> None
     await user.should_see("First session")
 
 
-async def test_new_chat_button_navigates_to_chat_page(user: User, context: PluginContext) -> None:
+async def test_new_session_button_navigates_to_new_session(
+    user: User, context: PluginContext
+) -> None:
     web.build(context, [SessionsPlugin(context)])
     await user.open("/sessions")
     await user.should_see("First session")
     user.find(marker="new-session-button").click()
-    await user.should_see("Chat", retries=10)
-    assert user.find(marker="chat-terminal").elements
+    await user.should_see("Message Hermes", retries=10)
+    assert user.find(marker="chat-input").elements
 
 
 async def test_list_paginates_with_numbered_pages(

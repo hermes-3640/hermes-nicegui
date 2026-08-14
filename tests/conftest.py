@@ -39,9 +39,21 @@ from hermes_nicegui.plugins.kanban.gateway import KanbanClient
 
 
 class FakeHermes:
-    """In-memory stand-in for the Hermes API server."""
+    """In-memory stand-in for the Hermes API server (session/job REST +
+    chat streaming), plus a mirror of the same ``hermes_home/state.db``
+    ``FakeHermesCli`` owns.
 
-    def __init__(self) -> None:
+    In production, a gateway write (create a session, send a chat turn)
+    and a direct SQLite read both ultimately look at the *same* daemon
+    state -- see the kanban fake's identical comment below. Session
+    *reads* in this app go through ``web.current_store()`` (direct SQLite),
+    while *sending* a chat turn still goes through this gateway client, so
+    a UI test that creates a session or sends a message and then expects
+    the (re-read) page to show it depends on that being true here too.
+    """
+
+    def __init__(self, hermes_home: Path) -> None:
+        self.hermes_home = hermes_home
         self.sessions: list[dict] = []
         self.messages: dict[str, list[dict]] = {}
         self.stream_events: list[tuple[str, dict]] = []
@@ -164,6 +176,7 @@ class FakeHermes:
                 "preview": None,
             }
             self.sessions.append(session)
+            self._mirror_new_session(session)
             return self._json({"object": "hermes.session", "session": session})
         if method == "GET" and path.startswith("/api/sessions/") and path.count("/") == 3:
             sid = path.split("/")[3]
@@ -187,6 +200,7 @@ class FakeHermes:
             sid = path.split("/")[3]
             body = json.loads(request.content) if request.content else {}
             self._record_turn(sid, body.get("input", ""))
+            self._mirror_turn(sid, body.get("input", ""))
             return self._sse(self.stream_events)
         if method == "GET" and path == "/api/jobs":
             return self._json({"jobs": self.jobs})
@@ -296,6 +310,70 @@ class FakeHermes:
                 session["message_count"] = session.get("message_count", 0) + 2
                 break
 
+    def _state_db_path(self) -> Path:
+        return self.hermes_home / "state.db"
+
+    def _mirror_new_session(self, session: dict) -> None:
+        """Insert a gateway-created session into ``state.db`` too, so an
+        immediate follow-up direct-SQLite read (opening the detail page
+        after "New session") finds it -- see the class docstring.
+
+        A no-op when ``state.db`` doesn't exist yet: gateway-only tests
+        (``test_gateway.py``) never bring up a ``FakeHermesCli`` to create
+        it, and have nothing that reads it back either.
+        """
+        if not self._state_db_path().exists():
+            return
+        con = sqlite3.connect(self._state_db_path())
+        con.execute(
+            f"INSERT INTO sessions ({','.join(_SESSION_COLUMNS)}) "
+            f"VALUES ({','.join('?' * len(_SESSION_COLUMNS))})",
+            [
+                session["id"], session.get("title"), session.get("source"),
+                session.get("model"), None, None, None, 0, 0, 0, 0, None, 0, 0, None,
+            ],
+        )
+        con.commit()
+        con.close()
+
+    def _mirror_turn(self, session_id: str, input_text: str) -> None:
+        """Insert the same user+assistant messages ``_record_turn`` appends
+        in-memory into ``state.db`` too -- see the class docstring and
+        ``_mirror_new_session``'s note on the no-``state.db``-yet case."""
+        if not self._state_db_path().exists():
+            return
+        final_content = next(
+            (
+                data.get("content", "")
+                for name, data in self.stream_events
+                if name == "assistant.completed"
+            ),
+            "",
+        )
+        con = sqlite3.connect(self._state_db_path())
+        next_id = con.execute("SELECT COALESCE(MAX(id), 0) FROM messages").fetchone()[0] + 1
+        con.executemany(
+            f"INSERT INTO messages ({','.join(_MESSAGE_COLUMNS)}) "
+            f"VALUES ({','.join('?' * len(_MESSAGE_COLUMNS))})",
+            [
+                (
+                    next_id, session_id, "user", input_text,
+                    None, None, None, 1786620020.0, None, None,
+                ),
+                (
+                    next_id + 1, session_id, "assistant", final_content,
+                    None, None, None, 1786620021.0, None, None,
+                ),
+            ],
+        )
+        con.execute(
+            "UPDATE sessions SET message_count = message_count + 2, "
+            "last_activity_at = ? WHERE id = ?",
+            (1786620021.0, session_id),
+        )
+        con.commit()
+        con.close()
+
     def _json(self, payload: dict, status: int = 200) -> httpx.Response:
         return httpx.Response(status, json=payload, headers={"Content-Type": "application/json"})
 
@@ -309,8 +387,8 @@ class FakeHermes:
 
 
 @pytest.fixture
-def hermes() -> FakeHermes:
-    return FakeHermes()
+def hermes(hermes_home: Path) -> FakeHermes:
+    return FakeHermes(hermes_home)
 
 
 # -- fake daemon on-disk state (state.db / cron/jobs.json) -------------------
