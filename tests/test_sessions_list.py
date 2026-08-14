@@ -63,6 +63,31 @@ async def test_new_session_button_navigates_to_new_session(
     assert user.find(marker="chat-input").elements
 
 
+async def test_new_session_button_reuses_existing_blank_session(
+    user: User, context: PluginContext, hermes
+) -> None:
+    """Clicking "New session" when a blank session already exists should
+    reopen it instead of creating another one -- there should only ever be
+    one blank session at a time."""
+    hermes.sessions.append(
+        {
+            "id": "sess-blank",
+            "title": None,
+            "source": "webui",
+            "message_count": 0,
+            "last_active": 1786630000.0,
+            "preview": None,
+        }
+    )
+    web.build(context, [SessionsPlugin(context)])
+    await user.open("/sessions")
+    await user.should_see("First session")
+    before = len(hermes.sessions)
+    user.find(marker="new-session-button").click()
+    await user.should_see("Message Hermes", retries=10)
+    assert len(hermes.sessions) == before
+
+
 async def test_search_filters_list(user: User, context: PluginContext) -> None:
     web.build(context, [SessionsPlugin(context)])
     await user.open("/sessions")

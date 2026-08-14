@@ -332,13 +332,23 @@ def register_pages(plugin: Plugin) -> None:
         _run_in_client(do_fork)
 
     def _new_session() -> None:
+        """Open a session with no messages yet, reusing one if it already exists.
+
+        Without this check, clicking "New session" repeatedly (e.g. after
+        navigating back without sending a message) littered the list with
+        empty sessions -- there should only ever be one at a time.
+        """
+
         async def do_create() -> None:
             try:
-                session = await client.create_session()
+                sessions, _ = await client.list_sessions(limit=PAGE_SIZE)
+                existing = next((s for s in sessions if s.message_count == 0), None)
+                if existing is None:
+                    existing = await client.create_session()
             except HermesError as exc:
                 ui.notify(f"Failed to start session: {exc}", type="negative")
                 return
-            ui.navigate.to(f"/sessions/{session.id}")
+            ui.navigate.to(f"/sessions/{existing.id}")
 
         _run_in_client(do_create)
 
