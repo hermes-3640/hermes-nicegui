@@ -32,14 +32,49 @@ async def test_sessions_list_paginates_and_searches(executor: HermesExecutor) ->
     assert total == 1
 
 
-async def test_sessions_get_detail_parses_tool_calls(executor: HermesExecutor) -> None:
-    session, messages = await build_store(executor, "").sessions.get_detail("sess-1")
+async def test_sessions_get_session_returns_row(executor: HermesExecutor) -> None:
+    session = await build_store(executor, "").sessions.get_session("sess-1")
     assert session.id == "sess-1"
+    assert session.title == "First session"
+
+
+async def test_sessions_get_messages_page_parses_tool_calls(executor: HermesExecutor) -> None:
+    messages, has_earlier = await build_store(executor, "").sessions.get_messages_page("sess-1")
     assert len(messages) == 3
+    assert has_earlier is False
     assert messages[0].role == "user"
     tool_calls = messages[2].tool_calls
     assert tool_calls is not None
     assert tool_calls[0]["function"]["name"] == "terminal"
+
+
+async def test_sessions_get_messages_page_paginates_backward(
+    executor: HermesExecutor, fake_hermes_cli
+) -> None:
+    """Seed a session with more messages than a small page size to exercise
+    the `before_id` keyset walk a "Load earlier" click drives."""
+    import sqlite3
+
+    con = sqlite3.connect(fake_hermes_cli._state_db_path())
+    con.executemany(
+        "INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+        [(i, "sess-1", "user", f"msg {i}", 1786620000.0 + i) for i in range(4, 8)],
+    )
+    con.commit()
+    con.close()
+
+    store = build_store(executor, "").sessions
+    newest, has_earlier = await store.get_messages_page("sess-1", limit=3)
+    assert [m.id for m in newest] == [5, 6, 7]
+    assert has_earlier is True
+
+    older, has_earlier = await store.get_messages_page("sess-1", before_id=5, limit=3)
+    assert [m.id for m in older] == [2, 3, 4]
+    assert has_earlier is True
+
+    oldest, has_earlier = await store.get_messages_page("sess-1", before_id=2, limit=3)
+    assert [m.id for m in oldest] == [1]
+    assert has_earlier is False
 
 
 async def test_sessions_rename_and_delete_go_through_cli(

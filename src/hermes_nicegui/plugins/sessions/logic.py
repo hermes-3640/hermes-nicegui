@@ -98,9 +98,16 @@ def source_icon(source: str | None) -> str:
 
 
 def oneline(text: str, limit: int = 88) -> str:
-    """First line of ``text``, trimmed to ``limit`` chars -- a collapsed row's summary."""
-    first_line = text.strip().splitlines()[0] if text.strip() else "(empty)"
-    return first_line if len(first_line) <= limit else first_line[: limit - 1] + "…"
+    """``text`` squashed to a single line and trimmed to ``limit`` chars --
+    a collapsed row's summary. Collapses *all* whitespace (not just takes
+    the first line): pretty-printed JSON stored with real newlines (e.g.
+    ``'{\\n  "output": "OK",\\n  ...\\n}'``) has ``"{"`` alone as its first
+    line, which as a summary tells you nothing -- squashing the whole thing
+    to one line surfaces the actual content instead."""
+    collapsed = " ".join(text.split())
+    if not collapsed:
+        return "(empty)"
+    return collapsed if len(collapsed) <= limit else collapsed[: limit - 1] + "…"
 
 
 def pretty_yaml(text: str) -> str:

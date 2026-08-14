@@ -68,7 +68,20 @@ WHERE (:source IS NULL OR s.source = :source)
 """
 
 _SESSION_ROW_SQL = "SELECT *, last_activity_at AS last_active FROM sessions WHERE id = ?"
-_SESSION_MESSAGES_SQL = "SELECT * FROM messages WHERE session_id = ? ORDER BY id"
+
+# Keyset (not offset) pagination: `:before_id` anchors on `messages.id`, which
+# is monotonic per session, so "the next page back" is stable even if newer
+# messages are being appended concurrently (an offset would skew under
+# concurrent inserts). Fetches `limit + 1` rows so `get_messages_page` can
+# tell whether an even-older page exists from the row count alone, without a
+# second COUNT query.
+_SESSION_MESSAGES_PAGE_SQL = """
+SELECT * FROM messages
+WHERE session_id = :session_id AND (:before_id IS NULL OR id < :before_id)
+ORDER BY id DESC LIMIT :limit
+"""
+
+DEFAULT_MESSAGES_PAGE_SIZE = 100
 
 
 def _message_from_row(row: dict) -> Message:
@@ -112,18 +125,36 @@ class SessionsStore:
         total = count_rows[0]["n"] if count_rows else 0
         return [Session.from_json(row) for row in rows], total
 
-    async def get_detail(self, session_id: str) -> tuple[Session, list[Message]]:
-        session_rows = await self.executor.read_sqlite(
+    async def get_session(self, session_id: str) -> Session:
+        rows = await self.executor.read_sqlite(
             "state.db", _SESSION_ROW_SQL, (session_id,), profile=self.profile
         )
-        if not session_rows:
+        if not rows:
             raise HermesError(f"session {session_id} not found")
-        message_rows = await self.executor.read_sqlite(
-            "state.db", _SESSION_MESSAGES_SQL, (session_id,), profile=self.profile
+        return Session.from_json(rows[0])
+
+    async def get_messages_page(
+        self,
+        session_id: str,
+        *,
+        before_id: int | None = None,
+        limit: int = DEFAULT_MESSAGES_PAGE_SIZE,
+    ) -> tuple[list[Message], bool]:
+        """One page of messages, newest-first on the wire but returned in
+        chronological order (what the transcript renders in) -- `before_id`
+        is the smallest `id` already loaded, so the *next* call walks
+        further back in history. `has_more=True` means an older page still
+        exists (a "Load earlier" control has something to fetch)."""
+        rows = await self.executor.read_sqlite(
+            "state.db",
+            _SESSION_MESSAGES_PAGE_SQL,
+            {"session_id": session_id, "before_id": before_id, "limit": limit + 1},
+            profile=self.profile,
         )
-        session = Session.from_json(session_rows[0])
-        messages = [_message_from_row(row) for row in message_rows]
-        return session, messages
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        rows.reverse()
+        return [_message_from_row(row) for row in rows], has_more
 
     async def rename(self, session_id: str, title: str) -> None:
         await hermes_cli.rename_session(self.executor, self.profile, session_id, title)

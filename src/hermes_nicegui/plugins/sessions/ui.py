@@ -112,6 +112,8 @@ def _collapsible_entry(
     summary: str,
     timestamp: float | None,
     render_body: Callable[[], None] | None,
+    *,
+    default_open: bool = False,
 ) -> None:
     """A timeline entry whose header *is* the summary, via Quasar's
     ``subtitle`` slot.
@@ -123,15 +125,55 @@ def _collapsible_entry(
     absolutely positioned at ``top: 0`` of the entry). The default ``title``
     slot could not be made to line up with the icon without fighting that
     layout; the subtitle slot already does, natively.
+
+    ``render_body`` only runs the first time the expansion is actually
+    opened, not at build time -- on a long transcript almost none of these
+    ever get opened, so building every tool result's YAML/markdown (and the
+    DOM nodes for it) up front is pure waste. See ``_lazy_expansion_body``.
+    ``default_open`` skips that laziness and builds immediately -- used for
+    the one entry (the transcript's last message) that should already be
+    visible without a click.
     """
     entry = ui.timeline_entry(icon=icon, color=color)
     _icon_tooltip(entry, timestamp)
     with entry.add_slot("subtitle"):
         if render_body is None:
-            ui.label(summary).classes("text-xs w-full")
+            # Matches Quasar's own `.q-item` header padding on the
+            # `ui.expansion` branch below (`padding: 2px 16px`, confirmed
+            # against the rendered DOM) -- without it, a plain label sits
+            # flush left while every collapsible row's text starts 16px in,
+            # making the transcript's left edge ragged wherever a
+            # single-line row (nothing to expand) sits next to one that has
+            # a body.
+            ui.label(summary).classes("text-xs w-full py-0.5 px-4")
         else:
-            with ui.expansion(summary).props("dense").classes("text-xs w-full"):
-                render_body()
+            expansion = (
+                ui.expansion(summary, value=default_open)
+                .props("dense")
+                .classes("text-xs w-full")
+            )
+            if default_open:
+                with expansion:
+                    render_body()
+            else:
+                _lazy_expansion_body(expansion, render_body)
+
+
+def _lazy_expansion_body(expansion: ui.expansion, render_body: Callable[[], None]) -> None:
+    """Defer building ``render_body``'s content into ``expansion`` until it's
+    opened for the first time, then leave it in the DOM (no need to tear
+    down on collapse -- Quasar itself just hides it via CSS)."""
+    built = False
+
+    def _build_once() -> None:
+        nonlocal built
+        if built or not expansion.value:
+            return
+        built = True
+        with expansion:
+            render_body()
+
+    expansion.on_value_change(_build_once)
 
 
 def _scroll_to_bottom(anchor: ui.element) -> None:
@@ -160,7 +202,14 @@ def _chat_bubble_shell(icon: str, color: str, sender: str, timestamp: float | No
 
     Split out from :func:`_chat_bubble` so a live-streamed reply can build
     the same shell once and keep updating the markdown's content as deltas
-    arrive, instead of re-rendering a whole new bubble per token.
+    arrive, instead of re-rendering a whole new bubble per token. Always
+    rendered open, unlike :func:`_chat_bubble` -- this is only ever used for
+    the reply actively streaming in during *this browser session*; collapsing
+    something mid-stream would hide the very thing the spinner/status row is
+    telling you to watch. Once that reply is done and the page later rebuilds
+    the transcript from data (e.g. after "Load earlier"), it re-renders
+    through :func:`_chat_bubble` like any other historical message -- there's
+    nothing that marks it as special past this one render.
     """
     entry = ui.timeline_entry(icon=icon, color=color)
     _icon_tooltip(entry, timestamp)
@@ -170,9 +219,33 @@ def _chat_bubble_shell(icon: str, color: str, sender: str, timestamp: float | No
         return ui.markdown()
 
 
-def _chat_bubble(icon: str, color: str, sender: str, content: str, timestamp: float | None) -> None:
-    """A visible chat message -- something the user or Hermes actually said."""
-    _chat_bubble_shell(icon, color, sender, timestamp).set_content(content)
+def _chat_bubble(
+    icon: str,
+    color: str,
+    sender: str,
+    content: str,
+    timestamp: float | None,
+    *,
+    default_open: bool = False,
+) -> None:
+    """A visible chat message -- something the user or Hermes actually said.
+
+    Collapsed by default, same as the mechanical event rows below (see
+    :func:`_collapsible_entry`): on a long transcript, most bubbles are
+    scrollback nobody's currently reading, and building their markdown/DOM
+    eagerly is wasted work at that scale. Two exceptions stay open:
+    ``default_open`` (used by :func:`render_transcript_events` for the
+    transcript's last message, so re-opening a session doesn't start on a
+    wall of collapsed rows) and the reply actively streaming in right now,
+    which goes through :func:`_chat_bubble_shell` instead.
+    """
+    summary = f"{sender}: {oneline(content, limit=80)}" if content else sender
+
+    def _body() -> None:
+        with ui.card().props("flat bordered").classes("w-fit max-w-full q-mt-xs q-mb-md"):
+            ui.markdown(content)
+
+    _collapsible_entry(icon, color, summary, timestamp, _body, default_open=default_open)
 
 
 def _step(icon: str, color: str, text: str, timestamp: float | None, *, mono: bool = False) -> None:
@@ -226,21 +299,39 @@ def _tool_round_trip(
 def render_transcript_events(messages: list[Message]) -> None:
     """Render the whole transcript as a true, chronological event timeline.
 
-    "You" and "Hermes" -- the things actually said -- stay fully visible;
-    everything else (reasoning, tool calls, tool results) collapses by
-    default so the conversation itself isn't buried in mechanics. A tool
-    call and its own result (matched by ``tool_call_id``, not just assumed
-    to be the next message) render as one fused entry -- see
+    Every entry -- chat bubbles included -- collapses to a one-line summary
+    by default (see :func:`_chat_bubble`/:func:`_collapsible_entry`), except
+    the *last* message actually said (the tail of ``messages``, which is
+    always the session's most recent when this renders the initial page --
+    see ``get_messages_page``): that one opens automatically, so loading a
+    session lands on what it last said instead of a wall of collapsed rows.
+    A tool call and its own result (matched by ``tool_call_id``, not just
+    assumed to be the next message) render as one fused entry -- see
     :func:`_tool_round_trip`.
     """
     results_by_call_id = {
         m.tool_call_id: m for m in messages if m.role == "tool" and m.tool_call_id
     }
     consumed_result_ids = {m.id for m in results_by_call_id.values()}
+    last_bubble_id = next(
+        (
+            m.id
+            for m in reversed(messages)
+            if m.role == "user" or (m.role == "assistant" and m.content)
+        ),
+        None,
+    )
 
     for msg in messages:
         if msg.role == "user":
-            _chat_bubble("person", "primary", "You", msg.content or "", msg.timestamp)
+            _chat_bubble(
+                "person",
+                "primary",
+                "You",
+                msg.content or "",
+                msg.timestamp,
+                default_open=msg.id == last_bubble_id,
+            )
 
         elif msg.role == "assistant":
             if msg.reasoning:
@@ -251,7 +342,14 @@ def render_transcript_events(messages: list[Message]) -> None:
                 result = results_by_call_id.get(call_id) if call_id else None
                 _tool_round_trip(fn.get("name", "tool"), fn.get("arguments"), result, msg.timestamp)
             if msg.content:
-                _chat_bubble("smart_toy", "secondary", "Hermes", msg.content, msg.timestamp)
+                _chat_bubble(
+                    "smart_toy",
+                    "secondary",
+                    "Hermes",
+                    msg.content,
+                    msg.timestamp,
+                    default_open=msg.id == last_bubble_id,
+                )
 
         elif msg.id not in consumed_result_ids:
             # An orphaned tool result: its call fell outside this page of
@@ -448,8 +546,10 @@ def register_pages(plugin: Plugin) -> None:
         ui.add_css(_TIMELINE_CSS)
         with frame(active="/sessions"):
             await ui.context.client.connected()
+            store = web.current_store()
             try:
-                session, messages = await web.current_store().sessions.get_detail(session_id)
+                session = await store.sessions.get_session(session_id)
+                loaded_messages, has_earlier = await store.sessions.get_messages_page(session_id)
             except HermesError as exc:
                 ui.label(f"Failed to load session: {exc}")
                 return
@@ -482,15 +582,73 @@ def register_pages(plugin: Plugin) -> None:
                         on_click=partial(_delete, session_id, lambda: ui.navigate.to("/sessions")),
                     )
 
+            # Only the latest page of messages is ever fetched/rendered up
+            # front -- a session can run to thousands of messages, and
+            # mounting a NiceGUI/Quasar element per message for all of them
+            # is what actually made huge transcripts slow, not the SQL read.
+            # `earlier_row` (a "Load earlier" button, or nothing once there's
+            # no more history) sits above `transcript` and never itself gets
+            # cleared by a transcript rebuild, so its position on the page is
+            # stable across "Load earlier" clicks -- see `_load_earlier`.
+            earlier_row = ui.row().classes("w-full justify-center")
             transcript = ui.column().classes("w-full")
             timeline: ui.timeline | None = None
-            if not messages:
-                with transcript:
-                    ui.label("No messages yet.")
-            else:
-                with transcript, ui.timeline(layout="dense").classes("w-full") as timeline:
-                    render_transcript_events(messages)
+            loading_more = False
+
+            def _render_earlier_button() -> None:
+                earlier_row.clear()
+                if not has_earlier:
+                    return
+                with earlier_row:
+                    ui.button(
+                        "Load earlier messages",
+                        icon="expand_less",
+                        on_click=lambda: _run_in_client(_load_earlier),
+                    ).props("flat dense").mark("load-earlier-button")
+
+            def _render_transcript() -> None:
+                nonlocal timeline
+                transcript.clear()
+                if not loaded_messages:
+                    with transcript:
+                        ui.label("No messages yet.")
+                    timeline = None
+                    return
+                with transcript, ui.timeline(layout="dense").classes("w-full") as tl:
+                    timeline = tl
+                    render_transcript_events(loaded_messages)
+
+            _render_earlier_button()
+            _render_transcript()
             _scroll_to_bottom(transcript)
+
+            async def _load_earlier() -> None:
+                nonlocal has_earlier, loading_more
+                if loading_more or not has_earlier:
+                    return
+                loading_more = True
+                earlier_row.clear()
+                with earlier_row:
+                    ui.spinner(size="sm")
+                try:
+                    oldest_id = loaded_messages[0].id if loaded_messages else None
+                    older, has_earlier = await store.sessions.get_messages_page(
+                        session_id, before_id=oldest_id
+                    )
+                except HermesError as exc:
+                    ui.notify(f"Failed to load earlier messages: {exc}", type="negative")
+                else:
+                    loaded_messages[:0] = older
+                finally:
+                    loading_more = False
+                _render_earlier_button()
+                _render_transcript()
+                # Anchor the view on the load-more control itself (stable
+                # across rebuilds -- see the comment above `earlier_row`)
+                # instead of jumping to the bottom, so the newly-revealed
+                # older messages land in view instead of scrolling past them.
+                with earlier_row:
+                    ui.run_javascript(f"getHtmlElement({earlier_row.id}).scrollIntoView()")
 
             def _timeline() -> ui.timeline:
                 """The transcript's live timeline, creating an empty one the
@@ -503,6 +661,15 @@ def register_pages(plugin: Plugin) -> None:
                         timeline = ui.timeline(layout="dense").classes("w-full")
                 return timeline
 
+            def _next_local_id() -> int:
+                """A locally-sent turn's messages don't have a real `state.db`
+                row id yet (the CLI/daemon assigns one on write, which this
+                page doesn't re-read). Any id past the current max is safe:
+                it only ever needs to sort after everything already loaded,
+                never to be used as a `before_id` key (that's always
+                `loaded_messages[0]`, the oldest, never these)."""
+                return (loaded_messages[-1].id if loaded_messages else 0) + 1
+
             async def send() -> None:
                 nonlocal session
                 text = (message_input.value or "").strip()
@@ -511,9 +678,11 @@ def register_pages(plugin: Plugin) -> None:
                 message_input.set_value("")
                 message_input.disable()
                 send_button.disable()
+                sent_at = datetime.now().timestamp()
+                content = ""
                 try:
                     with _timeline():
-                        _chat_bubble("person", "primary", "You", text, datetime.now().timestamp())
+                        _chat_bubble("person", "primary", "You", text, sent_at)
                         with ui.row().classes(
                             "items-center gap-2 text-xs opacity-60 q-mb-sm"
                         ) as status_row:
@@ -523,7 +692,6 @@ def register_pages(plugin: Plugin) -> None:
                             "smart_toy", "secondary", "Hermes", None
                         )
                     _scroll_to_bottom(transcript)
-                    content = ""
                     try:
                         async for event in client.stream_turn(
                             session_id, text, model=session.model
@@ -549,8 +717,33 @@ def register_pages(plugin: Plugin) -> None:
                     send_button.enable()
                     message_input.run_method("focus")
 
+                # Keep the in-memory page in sync with what's now on screen,
+                # so a later "Load earlier" (which rebuilds the transcript
+                # from `loaded_messages`, see `_render_transcript`) doesn't
+                # clobber the turn just sent -- it never went through a
+                # `get_messages_page` fetch, only straight onto the timeline
+                # above.
+                loaded_messages.append(
+                    Message(
+                        id=_next_local_id(),
+                        session_id=session_id,
+                        role="user",
+                        content=text,
+                        timestamp=sent_at,
+                    )
+                )
+                loaded_messages.append(
+                    Message(
+                        id=_next_local_id(),
+                        session_id=session_id,
+                        role="assistant",
+                        content=content,
+                        timestamp=datetime.now().timestamp(),
+                    )
+                )
+
                 try:
-                    session, _ = await web.current_store().sessions.get_detail(session_id)
+                    session = await store.sessions.get_session(session_id)
                 except HermesError:
                     pass
                 else:

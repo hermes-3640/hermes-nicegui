@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 from nicegui.testing import User
 
 from hermes_nicegui import web
@@ -56,3 +58,26 @@ async def test_empty_session_shows_placeholder(user: User, context: PluginContex
     web.build(context, [SessionsPlugin(context)])
     await user.open("/sessions/sess-2")
     await user.should_see("No messages yet.")
+
+
+async def test_load_earlier_messages_paginates(
+    user: User, context: PluginContext, fake_hermes_cli
+) -> None:
+    """Seed sess-1 past the default 100-message page so the detail page's
+    "Load earlier" control has something to fetch, and its own oldest
+    message (id 1, "How do I access your API?") starts out unloaded."""
+    con = sqlite3.connect(fake_hermes_cli._state_db_path())
+    con.executemany(
+        "INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+        [(i, "sess-1", "user", f"filler message {i}", 1786620000.0 + i) for i in range(4, 105)],
+    )
+    con.commit()
+    con.close()
+
+    web.build(context, [SessionsPlugin(context)])
+    await user.open("/sessions/sess-1")
+    await user.should_see("filler message 104")
+    await user.should_not_see("How do I access your API?")
+
+    user.find(marker="load-earlier-button").click()
+    await user.should_see("How do I access your API?")
