@@ -275,10 +275,48 @@ def _timeline_entry_of(element: ui.element) -> ui.timeline_entry | None:
     """Find the timeline entry containing a nested live element."""
     current: ui.element | None = element
     while current is not None:
-        if isinstance(current, ui.timeline_entry):
-            return current
-        current = current.parent_slot.parent if current.parent_slot is not None else None
+        try:
+            parent_slot = current.parent_slot
+            if parent_slot is not None and current not in parent_slot.children:
+                return None
+            if isinstance(current, ui.timeline_entry):
+                return current
+            current = parent_slot.parent if parent_slot is not None else None
+        except (AttributeError, ValueError):
+            return None
     return None
+
+
+def _is_attached(element: ui.element) -> bool:
+    """Return whether an element is still present in its parent slot chain."""
+    current: ui.element | None = element
+    try:
+        while current is not None and current.parent_slot is not None:
+            parent_slot = current.parent_slot
+            if current not in parent_slot.children:
+                return False
+            current = parent_slot.parent
+    except (AttributeError, ValueError):
+        return False
+    return True
+
+
+def _delete_if_attached(element: ui.element) -> None:
+    """Delete a live element unless a concurrent page teardown detached it."""
+    try:
+        if _is_attached(element):
+            element.delete()
+    except ValueError:
+        pass
+
+
+def _set_content_if_attached(element: ui.markdown, content: str) -> None:
+    """Update live markdown unless a concurrent page teardown detached it."""
+    try:
+        if _is_attached(element):
+            element.set_content(content)
+    except ValueError:
+        pass
 
 
 def _live_body_entry(
@@ -919,7 +957,7 @@ def register_pages(plugin: Plugin) -> None:
                                                 timestamp,
                                             )
                                         _scroll_to_bottom(transcript)
-                                    reasoning_md.set_content(reasoning_text)
+                                    _set_content_if_attached(reasoning_md, reasoning_text)
                                     status_row.set_visibility(False)
                                 elif active_tool is not None:
                                     active_tool.label.set_text(oneline(delta, limit=60))
@@ -935,7 +973,7 @@ def register_pages(plugin: Plugin) -> None:
                                 if reply_md is not None:
                                     reply_entry = _timeline_entry_of(reply_md)
                                     timeline_el = _timeline()
-                                    if reply_entry is not None:
+                                    if reply_entry is not None and _is_attached(active_tool.entry):
                                         try:
                                             reply_index = next(
                                                 i
@@ -947,12 +985,15 @@ def register_pages(plugin: Plugin) -> None:
                                         except StopIteration:
                                             pass
                                         else:
-                                            active_tool.entry.move(timeline_el, reply_index)
+                                            try:
+                                                active_tool.entry.move(timeline_el, reply_index)
+                                            except ValueError:
+                                                pass
                                 status_row.set_visibility(False)
                                 _scroll_to_bottom(transcript)
                             elif event.event in {"tool.completed", "tool.failed"}:
                                 if active_tool is not None:
-                                    active_tool.spinner.delete()
+                                    _delete_if_attached(active_tool.spinner)
                                     icon = (
                                         "error"
                                         if event.event == "tool.failed"
@@ -963,8 +1004,9 @@ def register_pages(plugin: Plugin) -> None:
                                         if event.event == "tool.failed"
                                         else "live-tool-done"
                                     )
-                                    with active_tool.row:
-                                        active_tool.done_mark = ui.icon(icon).mark(marker)
+                                    if _is_attached(active_tool.row):
+                                        with active_tool.row:
+                                            active_tool.done_mark = ui.icon(icon).mark(marker)
                                     active_tool = None
                                 _scroll_to_bottom(transcript)
                             elif event.event == "assistant.delta":
@@ -974,7 +1016,7 @@ def register_pages(plugin: Plugin) -> None:
                                             "smart_toy", "secondary", "Hermes", timestamp
                                         )
                                 reply_content += event.data.get("delta", "")
-                                reply_md.set_content(reply_content)
+                                _set_content_if_attached(reply_md, reply_content)
                                 status_row.set_visibility(False)
                                 _scroll_to_bottom(transcript)
                             elif event.event == "assistant.completed":
@@ -984,7 +1026,7 @@ def register_pages(plugin: Plugin) -> None:
                                             "smart_toy", "secondary", "Hermes", timestamp
                                         )
                                 reply_content = event.data.get("content", reply_content)
-                                reply_md.set_content(reply_content)
+                                _set_content_if_attached(reply_md, reply_content)
                                 status_row.set_visibility(False)
                                 _scroll_to_bottom(transcript)
                             elif event.event == "run.completed":
@@ -993,11 +1035,12 @@ def register_pages(plugin: Plugin) -> None:
                                 # run boundary still gives the live row a
                                 # definitive successful completion state.
                                 if active_tool is not None:
-                                    active_tool.spinner.delete()
-                                    with active_tool.row:
-                                        active_tool.done_mark = ui.icon(
-                                            "check_circle"
-                                        ).mark("live-tool-done")
+                                    _delete_if_attached(active_tool.spinner)
+                                    if _is_attached(active_tool.row):
+                                        with active_tool.row:
+                                            active_tool.done_mark = ui.icon(
+                                                "check_circle"
+                                            ).mark("live-tool-done")
                                     active_tool = None
                                 messages = event.data.get("messages")
                                 if isinstance(messages, list) and messages:

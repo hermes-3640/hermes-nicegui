@@ -14,6 +14,7 @@ from nicegui.testing import User
 from hermes_nicegui import web
 from hermes_nicegui.plugin import PluginContext
 from hermes_nicegui.plugins.sessions import SessionsPlugin
+from hermes_nicegui.plugins.sessions.ui import _delete_if_attached, _live_tool_entry
 
 
 async def test_detail_page_loads_directly(user: User, context: PluginContext) -> None:
@@ -130,6 +131,37 @@ async def test_live_tool_call_precedes_streamed_reply(
     ]
     assert marked.index("live-tool") < marked.index("live-reply")
     await user.should_see("terminal:")
+
+
+async def test_live_tool_cleanup_ignores_detached_spinner(
+    user: User, context: PluginContext, hermes
+) -> None:
+    hermes.stream_delay = 0.1
+    hermes.stream_events = [
+        ("run.started", {"run_id": "run_detach"}),
+        ("message.started", {"message": {"id": 20, "role": "assistant"}}),
+        (
+            "tool.started",
+            {"message_id": 20, "tool_name": "terminal", "args": '{"command": "ls"}'},
+        ),
+        ("tool.completed", {"message_id": 20, "tool_name": "terminal"}),
+        ("run.completed", {"completed": True, "usage": {}}),
+        ("done", {}),
+    ]
+    web.build(context, [SessionsPlugin(context)])
+    await user.open("/sessions/sess-1")
+    await user.should_see("How do I access your API?")
+
+    user.find(marker="chat-input").type("detach during tool cleanup")
+    user.find(marker="chat-send").click()
+    await user.should_see(marker="live-tool", retries=20)
+
+    timeline = next(iter(user.find(kind=ui.timeline).elements))
+    with timeline:
+        live_tool = _live_tool_entry("terminal", '{"command": "ls"}', None)
+    live_tool.row.delete()
+
+    _delete_if_attached(live_tool.spinner)
 
 
 async def test_run_completed_reconciles_authoritative_transcript(
