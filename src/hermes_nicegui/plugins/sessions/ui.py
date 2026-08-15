@@ -51,7 +51,21 @@ from hermes_nicegui.plugins.sessions.logic import (
 )
 from hermes_nicegui.web import frame
 
-SOURCES = {"": "All sources", "webui": "Web UI", "api_server": "API", "cron": "Cron"}
+SOURCES = {
+    "": "All sources",
+    "cli": "Terminal",
+    "webui": "Web UI",
+    "api_server": "API",
+    "cron": "Cron",
+    "kanban": "Kanban",
+    "telegram": "Telegram",
+    "discord": "Discord",
+    "slack": "Slack",
+    "desktop": "Desktop",
+    "dashboard": "Dashboard",
+    "hermes_browser": "Hermes Browser",
+    "browser": "Browser",
+}
 _SEEN_KEY = "sessions_seen"
 
 #: Cap on chat attachments awaiting send in one message (the uploader's own

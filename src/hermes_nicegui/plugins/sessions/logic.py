@@ -118,11 +118,19 @@ _SOURCE_ICONS = {
     "api_server": "api",
     "cron": "schedule",
     "kanban": "view_kanban",
+    "cli": "terminal",
+    "telegram": "send",
+    "discord": "forum",
+    "slack": "chat",
+    "desktop": "desktop_windows",
+    "dashboard": "dashboard",
+    "hermes_browser": "public",
+    "browser": "public",
 }
 
 
 def source_icon(source: str | None) -> str:
-    """Material icon name for a session's source, replacing a two-letter badge."""
+    """Material icon for all gateway-normalized session sources."""
     return _SOURCE_ICONS.get(source or "", "help_outline")
 
 
