@@ -181,3 +181,16 @@ async def test_search_filters_list(user: User, context: PluginContext) -> None:
     search.trigger("change")
     await user.should_see("Cron run", retries=10)
     await user.should_not_see("First session", retries=10)
+
+
+async def test_topbar_new_session_button_navigates_to_new_session(
+    user: User, context: PluginContext
+) -> None:
+    """The shared top-bar button (present on every frame() page, not just
+    /sessions) creates a session via the gateway and opens its detail page."""
+    web.build(context, [SessionsPlugin(context)])
+    await user.open("/sessions")
+    await user.should_see("First session")
+    user.find(marker="topbar-new-session-button").click()
+    await user.should_see("Message Hermes", retries=10)
+    assert user.find(marker="chat-input").elements

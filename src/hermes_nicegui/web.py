@@ -189,6 +189,20 @@ def _apply_theme() -> None:
         ui.dark_mode().disable()
 
 
+async def _new_session() -> None:
+    """Create a session via the gateway client and open it (top-bar button)."""
+    client = state.client
+    if client is None:
+        ui.notify("Gateway client unavailable", type="negative")
+        return
+    try:
+        session = await client.create_session()
+    except Exception as exc:  # noqa: BLE001 - surface any gateway failure in the UI
+        ui.notify(f"Failed to start session: {exc}", type="negative")
+        return
+    ui.navigate.to(f"/sessions/{session.id}")
+
+
 @contextmanager
 def frame(*, active: str = "") -> Iterator[None]:
     """Shared page frame: header + left nav drawer + content column.
@@ -214,6 +228,11 @@ def frame(*, active: str = "") -> Iterator[None]:
             ui.icon("device_hub")
             ui.label("Hermes")
             ui.space()
+            ui.button(icon="add", on_click=_new_session).props(
+                "flat round dense"
+            ).classes("text-white").tooltip("New session").mark(
+                "topbar-new-session-button"
+            )
             if state.profiles:
                 ui.select(
                     state.profiles,
