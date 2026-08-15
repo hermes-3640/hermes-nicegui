@@ -6,6 +6,9 @@ that happened in between (reasoning, tool calls, tool results) renders as a
 single collapsed row per event, identified by icon and color rather than a
 repeated text label -- see ``_step``/``_tool_round_trip``/``_chat_bubble``.
 Timestamps are available on hover (tooltip) rather than printed on every row.
+A turn actively streaming in (``send()``, below) gets these same rows live,
+as its own ``tool.progress``/``tool.started`` SSE events arrive -- see
+``_live_tool_call``.
 
 Session *reads* (list, detail, rename, delete) go straight at the daemon's
 own SQLite ``state.db`` for whichever profile is active for this browser tab
@@ -294,6 +297,27 @@ def _tool_round_trip(
 
     has_body = bool(args) or bool(result and result.content)
     _collapsible_entry("construction", "grey", label, timestamp, _body if has_body else None)
+
+
+def _live_tool_call(name: str, preview: str | None, args: dict | None, timestamp: float | None) -> None:
+    """One live row for a ``tool.started`` event during an in-progress turn.
+
+    Unlike :func:`_tool_round_trip` (built from a completed session's stored
+    messages, where a call and its result are matched by ``tool_call_id``),
+    the live SSE stream's ``tool.completed``/``tool.failed`` events carry no
+    call id and no result -- only the tool name (confirmed against the
+    Hermes Agent server: ``result``/``duration`` are captured into the
+    progress callback's ``**kwargs`` and never forwarded to the SSE payload).
+    There is nothing to fuse a completion onto, so this renders only the
+    call itself; the transcript gains the real, fused round trip once the
+    page is reloaded and reads it back from ``state.db``.
+    """
+    label = f"{name}: {oneline(preview, limit=60)}" if preview else name
+
+    def _body() -> None:
+        ui.code(pretty_yaml(json.dumps(args)), language="yaml").classes("w-full")
+
+    _collapsible_entry("construction", "grey", label, timestamp, _body if args else None)
 
 
 def render_transcript_events(messages: list[Message]) -> None:
@@ -696,10 +720,38 @@ def register_pages(plugin: Plugin) -> None:
                         async for event in client.stream_turn(
                             session_id, text, model=session.model
                         ):
+                            timestamp = event.data.get("ts")
                             if event.event == "tool.progress":
+                                # The only ``tool.progress`` this endpoint ever
+                                # emits is a reasoning step (tool_name
+                                # "_thinking") -- see _live_tool_call's
+                                # docstring for the matching note on
+                                # tool.started/completed.
+                                delta = event.data.get("delta", "")
+                                status_label.set_text(
+                                    oneline(delta, limit=60) if delta else "Thinking…"
+                                )
+                                if delta:
+                                    with _timeline():
+                                        _step("psychology", "amber", delta, timestamp)
+                            elif event.event == "tool.started":
                                 name = event.data.get("tool_name", "tool")
-                                delta = oneline(event.data.get("delta", ""), limit=60)
-                                status_label.set_text(f"{name}: {delta}" if delta else name)
+                                status_label.set_text(f"Running {name}…")
+                                with _timeline():
+                                    _live_tool_call(
+                                        name,
+                                        event.data.get("preview"),
+                                        event.data.get("args"),
+                                        timestamp,
+                                    )
+                            elif event.event == "tool.completed":
+                                status_label.set_text(
+                                    f"{event.data.get('tool_name', 'tool')} done"
+                                )
+                            elif event.event == "tool.failed":
+                                status_label.set_text(
+                                    f"{event.data.get('tool_name', 'tool')} failed"
+                                )
                             elif event.event == "assistant.delta":
                                 status_row.set_visibility(False)
                                 content += event.data.get("delta", "")

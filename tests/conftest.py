@@ -147,6 +147,11 @@ class FakeHermes:
             ("run.started", {"session_id": "sess-1", "run_id": "run_1"}),
             ("message.started", {"message": {"id": "msg_1", "role": "assistant"}}),
             ("tool.progress", {"tool_name": "_thinking", "delta": "thinking…"}),
+            (
+                "tool.started",
+                {"tool_name": "terminal", "preview": "ls", "args": {"command": "ls"}},
+            ),
+            ("tool.completed", {"tool_name": "terminal"}),
             ("assistant.delta", {"delta": "Hello "}),
             ("assistant.delta", {"delta": "world"}),
             ("assistant.completed", {"content": "Hello world"}),

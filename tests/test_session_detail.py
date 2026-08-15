@@ -43,6 +43,21 @@ async def test_send_message_streams_reply(user: User, context: PluginContext) ->
     await user.should_see("Hello world")
 
 
+async def test_send_message_shows_live_thinking_and_tool_calls(
+    user: User, context: PluginContext
+) -> None:
+    web.build(context, [SessionsPlugin(context)])
+    await user.open("/sessions/sess-1")
+    await user.should_see("How do I access your API?")
+
+    user.find(marker="chat-input").type("What's the weather?")
+    user.find(marker="chat-send").click()
+
+    await user.should_see("thinking…")
+    await user.should_see("terminal: ls")
+    await user.should_see("Hello world")
+
+
 async def test_send_message_refreshes_message_count(user: User, context: PluginContext) -> None:
     web.build(context, [SessionsPlugin(context)])
     await user.open("/sessions/sess-1")
