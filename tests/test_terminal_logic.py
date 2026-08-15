@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
 
 import pytest
@@ -83,7 +84,7 @@ def test_read_before_start_returns_none() -> None:
 def test_args_are_passed_to_the_command() -> None:
     """`args` lets a caller run a specific command (e.g. `hermes -p ha chat`
     for the chat page) instead of just a bare interactive shell."""
-    session = PtySession(shell="/bin/echo", args=["hello-args"])
+    session = PtySession(shell=sys.executable, args=["-c", "print('hello-args')"])
     try:
         session.start()
         assert b"hello-args" in _drain(session, until=b"hello-args")
