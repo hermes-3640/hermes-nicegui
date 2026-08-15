@@ -6,6 +6,7 @@ CLI-subprocess mutation boundary."""
 from __future__ import annotations
 
 from hermes_nicegui.executor import HermesExecutor
+from hermes_nicegui.plugins.kanban.logic import CANONICAL_COLUMNS
 from hermes_nicegui.store import build_store
 
 
@@ -127,10 +128,117 @@ async def test_kanban_list_tasks_filters_by_status(executor: HermesExecutor, fak
     assert total == 1
 
 
+async def test_kanban_list_tasks_orders_all_by_status_order(
+    executor: HermesExecutor, fake_kanban
+) -> None:
+    for task in [
+        {"id": "t_1", "status": "done", "priority": 1, "created_at": 400},
+        {"id": "t_ready_1", "status": "ready", "priority": 1, "created_at": 300},
+        {"id": "t_triage", "status": "triage", "priority": 3, "created_at": 100},
+        {"id": "t_ready_2", "status": "ready", "priority": 2, "created_at": 200},
+        {"id": "t_blocked", "status": "blocked", "priority": 1, "created_at": 250},
+        {"id": "t_review", "status": "review", "priority": 1, "created_at": 260},
+        {"id": "t_unknown", "status": "weird", "priority": 5, "created_at": 500},
+    ]:
+        fake_kanban.insert_task(task)
+
+    tasks, total = await build_store(executor, "").kanban.list_tasks(
+        status_order=CANONICAL_COLUMNS
+    )
+
+    assert [task.id for task in tasks] == [
+        "t_triage",
+        "t_ready_2",
+        "t_ready_1",
+        "t_review",
+        "t_blocked",
+        "t_1",
+        "t_unknown",
+    ]
+    assert total == 7
+
+
+async def test_kanban_list_tasks_without_status_order_keeps_priority_sort(
+    executor: HermesExecutor, fake_kanban
+) -> None:
+    for task in [
+        {"id": "t_1", "status": "done", "priority": 1, "created_at": 400},
+        {"id": "t_ready_1", "status": "ready", "priority": 1, "created_at": 300},
+        {"id": "t_triage", "status": "triage", "priority": 3, "created_at": 100},
+        {"id": "t_ready_2", "status": "ready", "priority": 2, "created_at": 200},
+        {"id": "t_unknown", "status": "weird", "priority": 5, "created_at": 500},
+    ]:
+        fake_kanban.insert_task(task)
+
+    tasks, total = await build_store(executor, "").kanban.list_tasks()
+
+    assert [task.id for task in tasks] == [
+        "t_unknown",
+        "t_triage",
+        "t_ready_2",
+        "t_ready_1",
+        "t_1",
+    ]
+    assert total == 5
+
 async def test_kanban_get_task_detail_includes_comments_and_runs(
     executor: HermesExecutor, fake_kanban
 ) -> None:
     detail = await build_store(executor, "").kanban.get_task_detail("t_1")
     assert detail.task.title == "Fix flaky test"
-    assert [c.body for c in detail.comments] == ["Looking into it"]
+    assert [c.body for c in detail.comments] == ["Looking into it\n\n**Investigating**"]
     assert detail.runs[0]["status"] == "completed"
+
+
+def _seed_worker_session(hermes_home, session_id: str, title: str, last_activity: float) -> None:
+    """Insert a kanban-tagged worker session row into the fake state.db."""
+    import sqlite3
+
+    con = sqlite3.connect(hermes_home / "state.db")
+    con.execute(
+        "INSERT INTO sessions (id, title, source, model, started_at, ended_at, end_reason,"
+        " message_count, tool_call_count, input_tokens, output_tokens, estimated_cost_usd,"
+        " pinned, archived, last_activity_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            session_id, title, "kanban", "deepseek-v4-flash",
+            None, None, None, 0, 0, 0, 0, None, 0, 0, last_activity,
+        ),
+    )
+    con.commit()
+    con.close()
+
+
+async def test_kanban_get_task_detail_resolves_worker_session(
+    executor: HermesExecutor, fake_kanban, hermes_home
+) -> None:
+    """The detail's `worker_session_id` must be the dispatcher's kanban
+    session doing the work (matched by title), not the task row's spawning
+    `session_id` -- that's the whole point of the field."""
+    _seed_worker_session(hermes_home, "worker-1", "work kanban task t_1", 1786620900.0)
+
+    detail = await build_store(executor, "").kanban.get_task_detail("t_1")
+    assert detail.task.session_id == "sess-99"  # spawning session, unchanged
+    assert detail.worker_session_id == "worker-1"
+
+
+async def test_kanban_get_task_detail_worker_session_picks_latest_run(
+    executor: HermesExecutor, fake_kanban, hermes_home
+) -> None:
+    """A retried task gets one kanban session per run (" #N" suffix); the
+    resolution must return the most recent one."""
+    _seed_worker_session(hermes_home, "worker-1", "work kanban task t_1", 1786620800.0)
+    _seed_worker_session(hermes_home, "worker-2", "work kanban task t_1 #2", 1786620900.0)
+
+    detail = await build_store(executor, "").kanban.get_task_detail("t_1")
+    assert detail.worker_session_id == "worker-2"
+
+
+async def test_kanban_get_task_detail_worker_session_none_when_unclaimed(
+    executor: HermesExecutor, fake_kanban
+) -> None:
+    """No kanban session for the task (never claimed) -> None, so the UI
+    falls back to the spawning session."""
+    detail = await build_store(executor, "").kanban.get_task_detail("t_1")
+    assert detail.task.session_id == "sess-99"
+    assert detail.worker_session_id is None

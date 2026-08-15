@@ -281,6 +281,25 @@ class HermesExecutor:
             text = await self._run_remote_io({"op": "read_text", "path": path})
         return json.loads(text) if text is not None else None
 
+    async def read_text(self, relative_path: str, *, profile: str = "") -> str | None:
+        """Raw text contents of a file under `profile_home(profile)`, or
+        `None` if it doesn't exist -- same shape as `read_json` but without
+        the JSON parse, for files (e.g. cron run output markdown) that aren't
+        JSON."""
+        path = f"{self.profile_home(profile)}/{relative_path}"
+        if self.mode == "local":
+            return await asyncio.to_thread(_read_text_local, path)
+        return await self._run_remote_io({"op": "read_text", "path": path})
+
+    async def list_dir(self, relative_path: str, *, profile: str = "") -> list[str]:
+        """Directory entries (plain filenames) under `profile_home(profile)`,
+        or `[]` if the directory doesn't exist -- mirrors `_listdir_local`/the
+        remote `listdir` op."""
+        path = f"{self.profile_home(profile)}/{relative_path}"
+        if self.mode == "local":
+            return await asyncio.to_thread(_listdir_local, path)
+        return await self._run_remote_io({"op": "listdir", "path": path})
+
     async def list_profile_names(self) -> list[str]:
         """Every profile name the daemon knows about, `"default"` first.
 

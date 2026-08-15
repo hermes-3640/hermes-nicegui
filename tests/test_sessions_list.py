@@ -67,6 +67,29 @@ async def test_sessions_list_renders(user: User, context: PluginContext) -> None
     await user.should_see("Cron run")
     await user.should_see("Unread")
     assert user.find(marker="refresh-button").elements
+    assert user.find(marker="mark-all-read-button").elements
+
+
+async def test_mark_all_read_button_clears_unread_filter(
+    user: User, context: PluginContext
+) -> None:
+    """With the Unread filter on, marking everything read must leave no rows."""
+    web.build(context, [SessionsPlugin(context)])
+    await user.open("/sessions")
+    await user.should_see("First session")
+    user.find(ui.switch).click()
+    await user.should_see("First session")
+    user.find(marker="mark-all-read-button").click()
+    await user.should_see("No sessions.", retries=10)
+
+
+async def test_running_session_row_shows_spinner(user: User, context: PluginContext) -> None:
+    web.build(context, [SessionsPlugin(context)])
+    await user.open("/sessions")
+    await user.should_see("First session")
+    await user.should_see("Cron run")
+    # Only sess-1 is seeded running -> exactly one spinner on the page.
+    assert len(user.find(marker="session-running").elements) == 1
 
 
 async def test_sessions_nav_item_present(user: User, context: PluginContext) -> None:

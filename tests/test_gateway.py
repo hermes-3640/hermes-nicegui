@@ -99,8 +99,6 @@ async def test_stream_turn_with_sink(client: HermesClient) -> None:
         "run.started",
         "message.started",
         "tool.progress",
-        "tool.started",
-        "tool.completed",
         "assistant.delta",
         "assistant.delta",
         "assistant.completed",

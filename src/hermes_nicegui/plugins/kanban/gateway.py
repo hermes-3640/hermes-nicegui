@@ -103,6 +103,3 @@ class KanbanClient:
 
     async def add_comment(self, task_id: str, body: str) -> None:
         await self._request("POST", f"/tasks/{task_id}/comments", json={"body": body})
-
-    async def trigger_dispatch(self) -> None:
-        await self._request("POST", "/dispatch")

@@ -71,6 +71,41 @@ def state_icon(state: str | None) -> tuple[str, str]:
     return _STATE_ICONS.get(state or "", ("help_outline", "grey"))
 
 
+_RUN_STATUS_ICONS: dict[str, tuple[str, str]] = {
+    "claimed": ("schedule", "grey"),
+    "running": ("autorenew", "secondary"),
+    "completed": ("check_circle", "positive"),
+    "failed": ("error", "negative"),
+}
+
+
+def run_status_icon(status: str | None) -> tuple[str, str]:
+    """Return the icon and color for an execution status."""
+    return _RUN_STATUS_ICONS.get(status or "", ("help_outline", "grey"))
+
+
+def fmt_duration(started_at: str | None, finished_at: str | None) -> str:
+    """Format the elapsed time between two ISO-8601 timestamps."""
+    if not started_at or not finished_at:
+        return "—"
+    try:
+        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        finished = datetime.fromisoformat(finished_at.replace("Z", "+00:00"))
+        seconds = (finished - started).total_seconds()
+    except (TypeError, ValueError):
+        return "—"
+    if seconds < 0:
+        return "—"
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    total_seconds = int(seconds)
+    minutes, remaining_seconds = divmod(total_seconds, 60)
+    if seconds < 3600:
+        return f"{minutes}m {remaining_seconds}s"
+    hours, remaining_minutes = divmod(minutes, 60)
+    return f"{hours}h" if remaining_minutes == 0 else f"{hours}h {remaining_minutes}m"
+
+
 def skills_to_text(skills: list[str] | None) -> str:
     return ", ".join(skills or [])
 

@@ -31,6 +31,30 @@ async def test_detail_page_shows_comments(
     await user.should_see("Looking into it")
 
 
+async def test_body_renders_as_markdown(
+    user: User, context: PluginContext, kanban_client: KanbanClient
+) -> None:
+    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    await user.open(f"/kanban/{TASK_ID}")
+
+    elements = list(user.find(marker="task-body-rendered").elements)
+    assert len(elements) == 1
+    assert isinstance(elements[0], ui.markdown)
+    assert "Goal" in elements[0].content
+    await user.should_see("Goal")
+
+
+async def test_comments_render_as_markdown(
+    user: User, context: PluginContext, kanban_client: KanbanClient
+) -> None:
+    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    await user.open(f"/kanban/{TASK_ID}")
+
+    elements = list(user.find(marker="comment-body").elements)
+    assert len(elements) >= 1
+    assert all(isinstance(element, ui.markdown) for element in elements)
+
+
 async def test_detail_page_has_actions(
     user: User, context: PluginContext, kanban_client: KanbanClient
 ) -> None:
@@ -85,6 +109,123 @@ async def test_view_session_button_shown_when_task_has_session(
     assert user.find(marker="view-session-button").elements
 
 
+async def test_view_session_links_to_worker_session_not_spawning(
+    user: User,
+    context: PluginContext,
+    kanban_client: KanbanClient,
+    hermes_home,
+) -> None:
+    """The fixture task's row records `sess-99` (the spawning session) but a
+    kanban-tagged worker session also exists: "View session" must prefer the
+    worker, and the origin must be reachable as a separate button -- not the
+    other way around (the bug this fixes)."""
+    import sqlite3
+
+    con = sqlite3.connect(hermes_home / "state.db")
+    con.execute(
+        "INSERT INTO sessions (id, title, source, model, started_at, ended_at, end_reason,"
+        " message_count, tool_call_count, input_tokens, output_tokens, estimated_cost_usd,"
+        " pinned, archived, last_activity_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "worker-1", "work kanban task t_1", "kanban", "deepseek-v4-flash",
+            None, None, None, 0, 0, 0, 0, None, 0, 0, 1786620900.0,
+        ),
+    )
+    con.commit()
+    con.close()
+
+    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    await user.open(f"/kanban/{TASK_ID}")
+    await user.should_see("Fix flaky test")
+    # Primary button targets the worker session; the spawning session is the
+    # secondary "Origin" button.
+    assert user.find(marker="view-session-button").elements
+    assert user.find(marker="view-origin-session-button").elements
+
+
+async def test_no_origin_button_without_spawning_session(
+    user: User,
+    context: PluginContext,
+    kanban_client: KanbanClient,
+    fake_kanban,
+    hermes_home,
+) -> None:
+    """Task created from the CLI/dashboard has no `session_id`: with a worker
+    session present only the primary button renders (no Origin button)."""
+    import sqlite3
+
+    fake_kanban.insert_task(
+        {
+            "id": "t_cli",
+            "title": "CLI-created task",
+            "body": "",
+            "assignee": "default",
+            "status": "done",
+            "priority": 2,
+            "created_at": 1786620001,
+            "started_at": None,
+            "completed_at": None,
+            "consecutive_failures": 0,
+            "last_failure_error": None,
+            "current_run_id": None,
+            "session_id": None,
+            "latest_summary": None,
+            "comment_count": 0,
+        }
+    )
+    con = sqlite3.connect(hermes_home / "state.db")
+    con.execute(
+        "INSERT INTO sessions (id, title, source, model, started_at, ended_at, end_reason,"
+        " message_count, tool_call_count, input_tokens, output_tokens, estimated_cost_usd,"
+        " pinned, archived, last_activity_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "worker-cli", "work kanban task t_cli", "kanban", "deepseek-v4-flash",
+            None, None, None, 0, 0, 0, 0, None, 0, 0, 1786620901.0,
+        ),
+    )
+    con.commit()
+    con.close()
+
+    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    await user.open("/kanban/t_cli")
+    await user.should_see("CLI-created task")
+    assert user.find(marker="view-session-button").elements
+    await user.should_not_see("Origin", retries=10)
+
+
+async def test_body_preview_hidden_when_empty(
+    user: User,
+    context: PluginContext,
+    kanban_client: KanbanClient,
+    fake_kanban,
+) -> None:
+    fake_kanban.insert_task(
+        {
+            "id": "t_empty",
+            "title": "Empty task",
+            "body": "",
+            "assignee": "default",
+            "status": "ready",
+            "priority": 2,
+            "created_at": 1786620002,
+            "started_at": None,
+            "completed_at": None,
+            "consecutive_failures": 0,
+            "last_failure_error": None,
+            "current_run_id": None,
+            "session_id": None,
+            "latest_summary": None,
+            "comment_count": 0,
+        }
+    )
+
+    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    await user.open("/kanban/t_empty")
+    await user.should_not_see(marker="task-body-rendered")
+
+
 async def test_runs_section_shows_run_status(
     user: User, context: PluginContext, kanban_client: KanbanClient
 ) -> None:
@@ -107,3 +248,20 @@ async def test_save_fields_updates_title(
     user.find(marker="save-task-button").click()
 
     await user.should_see("Renamed task", retries=10)
+
+
+async def test_body_preview_updates_after_save(
+    user: User, context: PluginContext, kanban_client: KanbanClient
+) -> None:
+    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    await user.open(f"/kanban/{TASK_ID}")
+
+    body_input = user.find(marker="task-body-input")
+    body_input.clear()
+    body_input.type("## Updated goal")
+    user.find(marker="save-task-button").click()
+
+    await user.should_see(marker="task-body-rendered", content="## Updated goal", retries=10)
+    elements = list(user.find(marker="task-body-rendered").elements)
+    assert len(elements) == 1
+    assert "Updated goal" in elements[0].content

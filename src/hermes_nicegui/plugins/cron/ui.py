@@ -1,4 +1,5 @@
-"""Cron plugin pages: job list + a per-job detail/edit view.
+"""Cron plugin pages: job list + a per-job detail/edit view + a per-run
+detail view.
 
 Listing reads `cron/jobs.json` directly; create/pause/resume/run/remove/edit
 go through the `hermes` CLI -- both via `web.current_store().cron` (see
@@ -12,6 +13,14 @@ fields (name, schedule, prompt, deliver, skills, repeat), and a raw-YAML tab
 for fields actually present -- editing via YAML can't set anything the form
 couldn't (the CLI has no generic field-setter), which mirrors what the old
 dashboard-REST path's own server-side whitelist already limited it to.
+
+The run detail page (`/cron/{job_id}/runs/{run_id}`, reachable by clicking a
+row on the detail page's "Runs" tab) shows one execution attempt: its
+metadata, the output markdown the scheduler saved under
+`cron/output/{job_id}/` when there is one, and a link to the state.db session
+the run spawned -- both resolved by `CronStore.find_run_output`/
+`find_related_session_id`, matched by wall-clock timestamp proximity since
+neither filename nor session id records the run's own id.
 """
 
 from __future__ import annotations
@@ -23,14 +32,16 @@ import yaml
 from nicegui import background_tasks, ui
 
 from hermes_nicegui import web
-from hermes_nicegui.gateway import HermesError, Job
+from hermes_nicegui.gateway import CronRun, HermesError, Job
 from hermes_nicegui.pagination import Pager, render_pager
 from hermes_nicegui.plugin import Plugin
 from hermes_nicegui.plugins.cron.logic import (
+    fmt_duration,
     fmt_iso,
     fmt_iso_age,
     fmt_repeat,
     job_to_yaml,
+    run_status_icon,
     skills_to_text,
     state_icon,
     text_to_skills,
@@ -134,6 +145,10 @@ def register_pages(plugin: Plugin) -> None:
                     with ui.item_section().props("side top"):
                         ui.label(fmt_iso_age(job.next_run_at)).classes("text-xs opacity-60")
                         ui.badge(job.deliver or "local", color="grey")
+                        if job.no_agent:
+                            ui.badge("script", color="secondary").props("outline").mark(
+                                "script-badge"
+                            ).tooltip(job.script or "script-only job")
 
             async def load_list() -> None:
                 try:
@@ -212,6 +227,7 @@ def register_pages(plugin: Plugin) -> None:
         with frame(active="/cron"):
             try:
                 job = await web.current_store().cron.get_job(job_id)
+                runs = await web.current_store().cron.list_runs(job_id)
             except HermesError as exc:
                 ui.label(f"Failed to load job: {exc}")
                 return
@@ -230,6 +246,10 @@ def register_pages(plugin: Plugin) -> None:
                     state_badge = ui.badge(job.state or "unknown", color=state_icon(job.state)[1])
                     ui.badge(job.deliver or "local", color="grey")
                 stats_label = ui.label(stats_text(job))
+                if job.no_agent:
+                    ui.label(f"Script (no-agent): {job.script or '—'}").mark("job-script-line")
+                else:
+                    ui.label("Mode: LLM agent (prompt-driven)").mark("job-agent-mode-line")
                 with ui.row():
                     pause_button = ui.button(
                         "Pause" if job.enabled else "Resume",
@@ -258,6 +278,7 @@ def register_pages(plugin: Plugin) -> None:
             with ui.tabs().classes("w-full") as tabs:
                 details_tab = ui.tab("details", label="Details")
                 yaml_tab = ui.tab("yaml", label="Raw YAML")
+                runs_tab = ui.tab("runs", label="Runs").mark("runs-tab")
 
             with ui.tab_panels(tabs, value=details_tab).classes("w-full"):
                 with ui.tab_panel(details_tab):
@@ -277,6 +298,11 @@ def register_pages(plugin: Plugin) -> None:
                         .props("outlined dense")
                         .classes("w-full")
                     )
+                    if job.no_agent:
+                        prompt_input.props("disabled")
+                        ui.label("Prompt is ignored for script-only (no-agent) jobs.").props(
+                            "caption"
+                        )
                     deliver_input = (
                         ui.input("Deliver", value=job.deliver or "")
                         .props("outlined dense")
@@ -323,4 +349,130 @@ def register_pages(plugin: Plugin) -> None:
 
                     ui.button("Save YAML", icon="save", on_click=save_yaml).mark("save-yaml-button")
 
+                with ui.tab_panel(runs_tab):
+                    with ui.row().classes("w-full items-center"):
+                        ui.label("Recent runs").classes("text-lg")
+                        ui.space()
+                        ui.button(
+                            icon="refresh",
+                            on_click=lambda: background_tasks.create(load_runs()),
+                        ).props("flat round dense").mark("runs-refresh-button").tooltip("Refresh")
+                    runs_list = ui.list().props("separator").classes("w-full")
+
+                    def render_run(run: CronRun) -> None:
+                        icon, color = run_status_icon(run.status)
+                        with (
+                            ui.item(
+                                on_click=partial(ui.navigate.to, f"/cron/{job_id}/runs/{run.id}")
+                            )
+                            .props("v-ripple")
+                            .mark("run-row")
+                        ):
+                            with ui.item_section().props("avatar"):
+                                ui.icon(icon, color=color)
+                            with ui.item_section():
+                                with ui.row().classes("items-center gap-2"):
+                                    ui.badge(run.status, color=color)
+                                    ui.label(
+                                        f"{fmt_iso(run.claimed_at)} · {fmt_iso_age(run.claimed_at)}"
+                                    ).classes("text-sm")
+                                ui.item_label(fmt_duration(run.started_at, run.finished_at)).props(
+                                    "caption"
+                                )
+                                if run.error:
+                                    ui.item_label(run.error).props("caption lines=2")
+                            with ui.item_section().props("side top"):
+                                ui.badge(run.source, color="grey")
+                            with ui.item_section().props("side"):
+                                ui.icon("chevron_right", color="grey")
+
+                    def render_runs(items: list[CronRun]) -> None:
+                        runs_list.clear()
+                        with runs_list:
+                            if not items:
+                                ui.label("No runs yet.").mark("runs-empty")
+                            for run in items:
+                                render_run(run)
+
+                    async def load_runs() -> None:
+                        try:
+                            fresh_runs = await web.current_store().cron.list_runs(job_id)
+                        except HermesError as exc:
+                            ui.notify(f"Failed to load runs: {exc}", type="negative")
+                            return
+                        render_runs(fresh_runs)
+
+                    render_runs(runs)
+
             logger.debug("cron detail rendered for {}", job_id)
+
+    @ui.page("/cron/{job_id}/runs/{run_id}", title="Cron Run")
+    async def cron_run_page(job_id: str, run_id: str) -> None:
+        with frame(active="/cron"):
+            try:
+                job = await web.current_store().cron.get_job(job_id)
+                run = await web.current_store().cron.get_run(job_id, run_id)
+            except HermesError as exc:
+                ui.label(f"Failed to load job: {exc}")
+                return
+            if run is None:
+                ui.label("Run not found")
+                return
+
+            with ui.row().classes("w-full items-center gap-2"):
+                ui.button(
+                    icon="arrow_back",
+                    on_click=partial(ui.navigate.to, f"/cron/{job_id}"),
+                ).props("flat round dense")
+                icon, color = run_status_icon(run.status)
+                ui.icon(icon, color=color)
+                ui.label(f"Run {run.id}").classes("text-lg font-bold")
+                ui.badge(run.status, color=color)
+                ui.space()
+                ui.label(job.name or "(unnamed)").classes("text-sm opacity-70")
+                ui.badge(run.source, color="grey")
+
+            with ui.card().classes("w-full"):
+                ui.label("Details").classes("text-lg font-bold")
+                for label, value in (
+                    ("Status", run.status),
+                    ("Source", run.source),
+                    ("PID", str(run.pid)),
+                    ("Claimed", fmt_iso(run.claimed_at)),
+                    ("Started", fmt_iso(run.started_at)),
+                    ("Finished", fmt_iso(run.finished_at)),
+                    ("Duration", fmt_duration(run.started_at, run.finished_at)),
+                ):
+                    with ui.row().classes("items-center gap-2"):
+                        ui.label(label).classes("w-24 opacity-70")
+                        ui.label(value)
+                if run.error:
+                    with ui.row().classes("items-center gap-2"):
+                        ui.label("Error").classes("w-24 opacity-70")
+                        ui.label(run.error).classes("text-negative")
+
+            output: tuple[str, str] | None = None
+            session_id: str | None = None
+            try:
+                output = await web.current_store().cron.find_run_output(job_id, run)
+                session_id = await web.current_store().cron.find_related_session_id(job_id, run)
+            except HermesError as exc:
+                ui.notify(f"Failed to load run details: {exc}", type="negative")
+
+            with ui.card().classes("w-full"):
+                ui.label("Output").classes("text-lg font-bold")
+                if output is not None:
+                    ui.markdown(output[1]).classes("w-full")
+                else:
+                    ui.label("No output file saved for this run.").classes("text-sm opacity-60")
+
+            if session_id:
+                ui.button(
+                    "View session",
+                    icon="chat",
+                    on_click=partial(ui.navigate.to, f"/sessions/{session_id}"),
+                ).mark("run-session-link")
+            else:
+                ui.label("No related session.").classes("text-sm opacity-60")
+
+            logger.debug("cron run detail rendered for {}", run_id)

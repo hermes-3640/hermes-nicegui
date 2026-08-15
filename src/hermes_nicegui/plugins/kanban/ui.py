@@ -5,8 +5,12 @@ style): that pattern needs horizontal panning that doesn't work on a phone,
 and there's no drag-and-drop here anyway (moving a task is a "Move to"
 select, same on every screen size). Instead ``/kanban`` renders one vertical
 list of every task with its status as a colored tag, plus a row of filter
-tabs to narrow it down -- the same single-column list pattern the cron and
-sessions pages already use.
+tabs and a free-text search box (``mark=kanban-search``) to narrow it down --
+the same single-column list pattern the cron and sessions pages already use.
+The search matches title, body, assignee, or task id server-side (the same
+``LIKE`` search `KanbanStore.list_tasks` applies), fires debounced after the
+user stops typing, and combines with the active status tab -- the pager's
+total reflects the filtered set.
 
 Mirrors ``plugins/cron/ui.py``'s shape (closures per mutation, wrapped in
 ``background_tasks.create`` so they can be awaited from a synchronous
@@ -24,10 +28,21 @@ picks up within ~60s and spawns a real agent run for -- there's no
 picker to the safer ``triage`` (parked, needs an explicit move) rather than
 matching that server-side default, and issues a follow-up PATCH via
 ``KanbanClient.create_task``'s ``status=`` kwarg when the two differ.
+
+One more create-time behavior: a task created with an **empty description**
+is auto-specified in the background — the UI runs ``hermes kanban specify``
+(the triage specifier: an auxiliary-LLM call that writes a Goal/Approach/
+Acceptance-criteria body and promotes the task ``triage -> todo``) via
+``HermesExecutor``, then reloads the board. The specifier only accepts
+triage tasks (the dialog's default), so a non-triage creation with an empty
+body just warns instead; the spec machinery is `hermes_cli`-style (CLI
+subprocess), not a new HTTP client.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 from functools import partial
 from typing import Any, cast
 
@@ -44,6 +59,8 @@ from hermes_nicegui.plugins.kanban.logic import (
     fmt_epoch,
     fmt_epoch_age,
     fmt_priority,
+    parse_specify_outcome,
+    should_auto_specify,
 )
 from hermes_nicegui.web import frame
 
@@ -51,6 +68,49 @@ from hermes_nicegui.web import frame
 def register_pages(plugin: Plugin) -> None:
     client = plugin.kanban_client  # type: ignore[attr-defined]
     logger = plugin.logger
+    executor = plugin.context.executor
+
+    # A card created with an empty description is auto-fleshed-out by the
+    # triage specifier (`hermes kanban specify`, an auxiliary-LLM call that
+    # writes Goal/Approach/Acceptance criteria and promotes triage -> todo).
+    # The specifier only accepts triage tasks, which is also the dialog's
+    # default starting status; a non-triage creation with an empty body
+    # can't use it, so the user gets a warning instead.
+    AUTO_SPECIFY_TIMEOUT = 240  # the CLI's LLM call has its own 120s cap + retries
+
+    def _auto_specify(task_id: str, on_updated: Any) -> None:
+        """Run the triage specifier on a just-created task in the background.
+
+        Fires the `hermes` CLI (the sanctioned mutation path for kanban.db)
+        and reloads the board when it lands, so the new title/status/body
+        show up. Never raises into the dialog handler; failures surface as
+        notifications and the task stays in Triage.
+        """
+
+        async def do_specify() -> None:
+            try:
+                result = await asyncio.wait_for(
+                    executor.run("kanban", "specify", task_id, "--json"),
+                    timeout=AUTO_SPECIFY_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("kanban auto-specify {} timed out", task_id)
+                ui.notify("Auto-specify timed out — task stays in Triage", type="negative")
+                return
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("kanban auto-specify {} failed: {}", task_id, exc)
+                ui.notify(f"Auto-specify failed: {exc}", type="negative")
+                return
+            ok, reason, _new_title = parse_specify_outcome(result.stdout)
+            if ok:
+                logger.debug("kanban auto-specify {} ok", task_id)
+                ui.notify("Task created — spec auto-generated", type="positive")
+            else:
+                logger.info("kanban auto-specify {}: {}", task_id, reason)
+                ui.notify(f"Auto-specify failed: {reason}", type="negative")
+            on_updated(task_id)
+
+        background_tasks.create(do_specify())
 
     def _create_task_dialog(on_created: Any) -> None:
         with ui.dialog() as dialog, ui.card().classes("w-full max-w-md"):
@@ -58,7 +118,12 @@ def register_pages(plugin: Plugin) -> None:
             title = (
                 ui.input("Title").props("outlined dense").classes("w-full").mark("new-task-title")
             )
-            body = ui.textarea("Description").props("outlined dense").classes("w-full")
+            body = (
+                ui.textarea("Description")
+                .props("outlined dense")
+                .classes("w-full")
+                .mark("new-task-body")
+            )
             assignee = (
                 ui.input("Assignee", value="default").props("outlined dense").classes("w-full")
             )
@@ -79,6 +144,7 @@ def register_pages(plugin: Plugin) -> None:
                 if not new_title:
                     ui.notify("Title is required", type="warning")
                     return
+                body_text = (body.value or "").strip()
                 try:
                     task = await client.create_task(
                         title=new_title,
@@ -93,6 +159,13 @@ def register_pages(plugin: Plugin) -> None:
                 dialog.close()
                 ui.notify("Task created", type="positive")
                 on_created(task)
+                if should_auto_specify(body_text, status.value):
+                    _auto_specify(task.id, on_created)
+                elif not body_text:
+                    ui.notify(
+                        "Created with an empty description — add one on the task page",
+                        type="warning",
+                    )
 
             with ui.row().classes("w-full justify-end gap-2"):
                 ui.button("Cancel", on_click=dialog.close).props("flat")
@@ -110,7 +183,7 @@ def register_pages(plugin: Plugin) -> None:
                 ui.button(
                     icon="bolt", on_click=lambda: background_tasks.create(do_dispatch())
                 ).props("flat round dense").mark("dispatch-button").tooltip(
-                    "Trigger a dispatcher tick"
+                    "Start next ticket(s) — one at a time (per-profile cap)"
                 )
                 ui.button(
                     icon="refresh", on_click=lambda: background_tasks.create(_refresh())
@@ -138,6 +211,13 @@ def register_pages(plugin: Plugin) -> None:
                     label, icon, _color = column_meta(name)
                     ui.tab(name, label=label, icon=icon).mark(f"filter-tab-{name}")
             filter_tabs.value = "all"
+
+            search_input = (
+                ui.input(placeholder="Search tasks...")
+                .props("outlined dense clearable debounce=500 icon=search")
+                .classes("w-full")
+                .mark("kanban-search")
+            )
 
             list_container = ui.list().props("separator").classes("w-full")
 
@@ -173,16 +253,38 @@ def register_pages(plugin: Plugin) -> None:
                 pager.reset()
                 background_tasks.create(load_board())
 
+            def _search_changed(e: Any) -> None:
+                pager.reset()
+                background_tasks.create(load_board())
+
             filter_tabs.on_value_change(_tab_changed)
+            search_input.on_value_change(_search_changed)
 
             async def do_dispatch() -> None:
                 try:
-                    await client.trigger_dispatch()
-                except KanbanError as exc:
+                    result = await web.current_executor().run("kanban", "dispatch", "--json")
+                    if result.returncode != 0:
+                        ui.notify(
+                            f"Dispatch failed: exit {result.returncode}: {result.stderr[:500]}",
+                            type="negative",
+                        )
+                        return
+                    data = json.loads(result.stdout or "{}")
+                    spawned = data.get("spawned") or []
+                    deferred = data.get("skipped_per_profile_capped") or []
+                    if spawned:
+                        ui.notify(f"Started {len(spawned)} ticket(s)", type="positive")
+                    elif deferred:
+                        ui.notify(
+                            f"{deferred[0].get('assignee')} at per-profile cap "
+                            f"({deferred[0].get('current')} running) — tickets start when a slot frees",
+                            type="warning",
+                        )
+                    else:
+                        ui.notify("Dispatcher tick — nothing to start", type="positive")
+                    await load_board()
+                except Exception as exc:
                     ui.notify(f"Dispatch failed: {exc}", type="negative")
-                    return
-                ui.notify("Dispatcher tick triggered", type="positive")
-                await load_board()
 
             async def load_board() -> None:
                 nonlocal total
@@ -190,8 +292,10 @@ def register_pages(plugin: Plugin) -> None:
                 try:
                     current_tasks[:], total = await web.current_store().kanban.list_tasks(
                         status=None if status_filter == "all" else status_filter,
+                        search=(search_input.value or "").strip() or None,
                         limit=pager.limit,
                         offset=pager.offset,
+                        **({"status_order": CANONICAL_COLUMNS} if status_filter == "all" else {}),
                     )
                 except HermesError as exc:
                     ui.notify(f"Failed to load board: {exc}", type="negative")
@@ -302,12 +406,43 @@ def register_pages(plugin: Plugin) -> None:
                     delete_button = ui.button("Delete", icon="delete", color="negative").mark(
                         "delete-task-button"
                     )
-                    if task.session_id:
+                    # "View session" must point at the session *doing the
+                    # work* -- the dispatcher's kanban-tagged worker session
+                    # (resolved from state.db by `KanbanStore`) -- not the
+                    # task row's `session_id`, which is only the session that
+                    # *created* the task. Fall back to the origin session
+                    # while no worker session exists yet (task never
+                    # claimed); when both exist and differ, keep the origin
+                    # reachable as a secondary button.
+                    worker_session_id = detail.worker_session_id
+                    if worker_session_id:
+                        ui.button(
+                            "View session",
+                            icon="terminal",
+                            on_click=partial(
+                                ui.navigate.to, f"/sessions/{worker_session_id}"
+                            ),
+                        ).props("outline").mark("view-session-button").tooltip(
+                            "Session doing the work"
+                        )
+                        if task.session_id and task.session_id != worker_session_id:
+                            ui.button(
+                                "Origin",
+                                icon="chat",
+                                on_click=partial(
+                                    ui.navigate.to, f"/sessions/{task.session_id}"
+                                ),
+                            ).props("flat dense").mark("view-origin-session-button").tooltip(
+                                "Session that created this task"
+                            )
+                    elif task.session_id:
                         ui.button(
                             "View session",
                             icon="terminal",
                             on_click=partial(ui.navigate.to, f"/sessions/{task.session_id}"),
-                        ).props("outline").mark("view-session-button")
+                        ).props("outline").mark("view-session-button").tooltip(
+                            "Origin session (no worker session yet)"
+                        )
 
             if detail.runs:
                 with ui.expansion(f"Runs ({len(detail.runs)})", icon="history").classes("w-full"):
@@ -332,6 +467,8 @@ def register_pages(plugin: Plugin) -> None:
                 failure_label.set_text(task.last_failure_error or "")
                 failure_label.set_visibility(bool(task.last_failure_error))
                 move_select.set_value(task.status)
+                body_preview.set_content(task.body or "")
+                body_preview.set_visibility(bool(task.body))
 
             def on_move_change(event: Any) -> None:
                 if event.value and event.value != task.status:
@@ -346,6 +483,8 @@ def register_pages(plugin: Plugin) -> None:
                 .classes("w-full")
                 .mark("task-title-input")
             )
+            body_preview = ui.markdown(task.body or "").classes("w-full").mark("task-body-rendered")
+            body_preview.set_visibility(bool(task.body))
             body_input = (
                 ui.textarea("Description", value=task.body or "")
                 .props("outlined dense")
@@ -394,7 +533,7 @@ def register_pages(plugin: Plugin) -> None:
                                 ui.label(fmt_epoch(comment.created_at)).classes(
                                     "text-xs opacity-60"
                                 )
-                            ui.label(comment.body)
+                            ui.markdown(comment.body).classes("w-full").mark("comment-body")
 
             render_comments(detail.comments)
 

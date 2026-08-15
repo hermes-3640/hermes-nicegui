@@ -38,3 +38,4 @@ def test_canonical_columns_has_eight_statuses() -> None:
     assert len(CANONICAL_COLUMNS) == 8
     assert "ready" in CANONICAL_COLUMNS
     assert "triage" in CANONICAL_COLUMNS
+    assert CANONICAL_COLUMNS.index("review") < CANONICAL_COLUMNS.index("blocked")

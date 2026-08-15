@@ -5,9 +5,11 @@ from __future__ import annotations
 import pytest
 
 from hermes_nicegui.plugins.cron.logic import (
+    fmt_duration,
     fmt_iso,
     fmt_repeat,
     job_to_yaml,
+    run_status_icon,
     skills_to_text,
     state_icon,
     text_to_skills,
@@ -44,6 +46,27 @@ def test_state_icon_known() -> None:
 def test_state_icon_unknown_falls_back() -> None:
     icon, _color = state_icon(None)
     assert icon == "help_outline"
+
+
+def test_run_status_icons() -> None:
+    assert run_status_icon("claimed") == ("schedule", "grey")
+    assert run_status_icon("running") == ("autorenew", "secondary")
+    assert run_status_icon("completed") == ("check_circle", "positive")
+    assert run_status_icon("failed") == ("error", "negative")
+    assert run_status_icon("unknown") == ("help_outline", "grey")
+    assert run_status_icon(None) == ("help_outline", "grey")
+
+
+def test_fmt_duration_formats_seconds_minutes_and_hours() -> None:
+    assert fmt_duration("2026-08-15T00:00:00Z", "2026-08-15T00:00:02.3Z") == "2.3s"
+    assert fmt_duration("2026-08-15T00:00:00Z", "2026-08-15T00:05:12Z") == "5m 12s"
+    assert fmt_duration("2026-08-15T00:00:00Z", "2026-08-15T01:05:12Z") == "1h 5m"
+    assert fmt_duration("2026-08-15T00:00:00Z", "2026-08-15T02:00:00Z") == "2h"
+
+
+def test_fmt_duration_missing_or_unparseable() -> None:
+    assert fmt_duration(None, "2026-08-15T00:00:00Z") == "—"
+    assert fmt_duration("not a date", "2026-08-15T00:00:00Z") == "—"
 
 
 def test_skills_roundtrip() -> None:

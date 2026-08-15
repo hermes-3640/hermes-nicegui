@@ -57,6 +57,12 @@ Hermes install. Kanban needs `HERMES_KANBAN_URL`/`_USERNAME`/`_PASSWORD` set.
 | `HERMES_LOG_LEVEL` | `INFO` | loguru level |
 | `HERMES_FILES_ROOT` | `.` (cwd) | Directory the files plugin is confined to |
 | `HERMES_FILES_EDIT_MAX_BYTES` | `2097152` | Max file size the editor will load (larger files are download-only) |
+| `HERMES_CHAT_UPLOADS_DIR` | `<HERMES_HOME>/uploads` | Where chat attachments are saved (must be a path the agent on this box can read) |
+| `HERMES_CHAT_UPLOAD_MAX_BYTES` | `26214400` | Per-file cap for chat attachments (bytes) |
+| `HERMES_XAELWIKI_NOTES_DIR` | `/var/lib/xaelwiki/notes` | Directory of the xaelwiki notes vault (a git repo of markdown files with YAML frontmatter) the xaelwiki plugin browses read-only |
+| `HERMES_XAELWIKI_REFRESH_SECONDS` | `30` | How often the notes list re-scans the vault (also the store's cache TTL) |
+| `HERMES_COSTS_ENV_FILE` | `/run/agenix/hermes-env` | `KEY=value` file used by the costs plugin for provider credentials when they are not in the process environment |
+| `HERMES_OPENCODE_DB` | `~/.local/share/opencode/opencode-stable.db` | OpenCode SQLite database used for local session spend |
 
 `HERMES_GATEWAY_URL`/`HERMES_API_TOKEN`/`HERMES_DEFAULT_MODEL`/
 `HERMES_DEFAULT_PROVIDER` still exist (`hermes_nicegui.gateway.HermesClient`)
@@ -87,6 +93,16 @@ direct gateway integration is useful again later.
 > something narrower than a whole home directory, and don't bind
 > `HERMES_UI_HOST` past `127.0.0.1` unless something else is guarding access
 > too.
+
+> **Chat attachments are local paths, not uploads to the gateway:** the
+> session chat's paperclip saves picked files under `HERMES_CHAT_UPLOADS_DIR`
+> (default `<HERMES_HOME>/uploads`, per-session subdirectory) and the sent
+> message carries an `Attached files:` block listing each absolute path —
+> the same path-reference convention every other Hermes surface uses for
+> inbound media. This only works when the agent runs on the same box (the
+> deploy setup): a remote `HERMES_EXEC_MODE=ssh` gateway can't see these
+> local paths. Attachments are not sent through the gateway API itself — its
+> chat endpoint rejects `file` content parts.
 
 > **Auth is one local admin account, no more:** first visit to any page
 > shows a "create admin account" form (`hermes_nicegui.auth`, backed by a
@@ -189,6 +205,49 @@ Current plugins:
   images/PDF/audio/video, raw download for everything else, a streaming
   `.tar.zst` download of any directory, and file or whole-folder uploads
   (folder uploads keep their relative paths — see the files gotcha above)
+- `xaelwiki` — read-only browser/search over the xaelwiki notes vault (a git
+  repo of markdown files with YAML frontmatter). It reads the vault straight
+  from disk (`HERMES_XAELWIKI_NOTES_DIR`, default `/var/lib/xaelwiki/notes`)
+  — no MCP server, no token. `/xaelwiki` lists every note newest-updated
+  first with a real-time search box (title/tags/body) and a folder filter;
+  `/xaelwiki/{note_id}` shows the full note. The process user must be able to
+  read the vault; on the deploy box the hermes user is in the xaelwiki group
+  for exactly this.
+- `costs` — provider spend summaries and usage tables for OpenRouter and the
+  OpenCode Go plan. OpenCode Go budget is server-reported from the Go plan
+  usage API (`GET https://opencode.ai/zen/go/v1/usage` with an
+  `OPENCODE_API_KEY`/`OPENCODE_GO_API_KEY` from the environment or
+  `HERMES_COSTS_ENV_FILE`), with a fallback to estimating from the local
+  OpenCode SQLite database when the API is unavailable. OpenRouter
+  credentials can come from `OPENROUTER_API_KEY` or `HERMES_COSTS_ENV_FILE`;
+  unavailable providers are shown without preventing the rest of the page
+  from loading.
+
+### Adding the xaelwiki plugin to another NiceGUI app
+
+The plugin is a plain `Plugin` subclass, so any existing NiceGUI app can host
+it with one import + registration call (do this before `ui.run()` or inside
+an `app.on_startup` handler, like the built-in plugins do):
+
+```python
+from loguru import logger
+
+from hermes_nicegui.config import Settings
+from hermes_nicegui.executor import HermesExecutor
+from hermes_nicegui.plugin import PluginContext
+from hermes_nicegui.plugins.xaelwiki import XaelWikiPlugin
+
+context = PluginContext(
+    settings=Settings(),                  # reads HERMES_XAELWIKI_* env vars
+    logger=logger,
+    executor=HermesExecutor(mode="local", hermes_bin="hermes"),
+)
+XaelWikiPlugin(context, notes_dir="/srv/notes", refresh_seconds=30).register()
+```
+
+This adds `/xaelwiki` (list + search) and `/xaelwiki/{note_id}` (detail) to
+the app. `notes_dir`/`refresh_seconds` override the `HERMES_XAELWIKI_*`
+environment defaults; omit them to use the defaults (the deploy-box vault).
 
 ## Testing
 

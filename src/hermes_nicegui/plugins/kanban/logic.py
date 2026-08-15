@@ -8,6 +8,7 @@ cron's ``fmt_iso*``.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 
@@ -47,8 +48,8 @@ CANONICAL_COLUMNS = [
     "scheduled",
     "ready",
     "running",
-    "blocked",
     "review",
+    "blocked",
     "done",
 ]
 
@@ -71,3 +72,38 @@ def column_meta(status: str | None) -> tuple[str, str, str]:
 
 def fmt_priority(priority: int | None) -> str:
     return f"P{priority}" if priority is not None else "—"
+
+
+def should_auto_specify(body: str | None, status: str | None) -> bool:
+    """Whether a task just created from this UI should be auto-specified.
+
+    True when the description is empty/whitespace AND the task landed in
+    Triage — the only column the triage specifier (`hermes kanban specify`)
+    will touch. A non-triage creation with an empty body can't be
+    auto-specified by the built-in tool, so callers should warn instead.
+    """
+    return not (body or "").strip() and status == "triage"
+
+
+def parse_specify_outcome(stdout: str) -> tuple[bool, str, str | None]:
+    """Parse one `--json` line from ``hermes kanban specify``.
+
+    Returns ``(ok, reason, new_title)``. The CLI emits exactly one JSON
+    object per task on stdout (even on failure, with an ``ok: false``
+    payload), so the last non-empty line is the outcome. Falls back to a
+    ``(False, ...)`` verdict on any parse failure rather than raising —
+    callers surface the reason to the user.
+    """
+    try:
+        line = next(
+            ln for ln in reversed((stdout or "").splitlines()) if ln.strip()
+        )
+        blob = json.loads(line)
+    except (ValueError, StopIteration, json.JSONDecodeError):
+        return False, "no JSON output from specifier", None
+    if not isinstance(blob, dict):
+        return False, "unexpected specifier output", None
+    ok = bool(blob.get("ok"))
+    reason = blob.get("reason") or ("specified" if ok else "specify failed")
+    new_title = blob.get("new_title")
+    return ok, str(reason), str(new_title) if isinstance(new_title, str) else None
