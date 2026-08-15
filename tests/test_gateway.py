@@ -42,7 +42,7 @@ async def test_list_sessions(client: HermesClient) -> None:
 async def test_create_session(client: HermesClient) -> None:
     s = await client.create_session(title="brand new")
     assert s.id == "sess-new"
-    assert s.source == "api_server"
+    assert s.source == "webui"
 
 
 async def test_get_session(client: HermesClient) -> None:

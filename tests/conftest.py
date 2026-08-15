@@ -189,7 +189,7 @@ class FakeHermes:
             session = {
                 "id": new_id,
                 "title": body.get("title"),
-                "source": "api_server",
+                "source": body.get("source") or "api_server",
                 "model": "hermes-agent",
                 "message_count": 0,
                 "tool_call_count": 0,

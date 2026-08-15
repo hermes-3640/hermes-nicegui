@@ -465,6 +465,9 @@ class HermesClient:
             body["model"] = self.default_model
         if self.default_provider:
             body["provider"] = self.default_provider
+        # Tag sessions created from the web UI so the gateway accepts and
+        # preserves the webui source.
+        body["source"] = "webui"
         data = await self._request("POST", "/api/sessions", json=body)
         inner = data.get("session") or data
         return Session.from_json(inner)
