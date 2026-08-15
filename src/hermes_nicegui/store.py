@@ -411,7 +411,7 @@ def _kanban_where(search: str | None) -> str:
     """The optional `LIKE` predicate shared by `_kanban_list_sql` and
     `_kanban_count_sql` so a filtered page's `total` always matches the rows
     it returns: a case-insensitive substring match against a task's title,
-    body, assignee, or id. Empty when no search is active, so the rest of the
+    body, assignee, id, or comment body. Empty when no search is active, so the rest of the
     query is unchanged. `:search` is a named param holding the caller's
     already-escaped `%...%` pattern."""
     if not search:
@@ -420,7 +420,9 @@ def _kanban_where(search: str | None) -> str:
         " AND (t.title LIKE :search ESCAPE '\\'"
         " OR t.body LIKE :search ESCAPE '\\'"
         " OR t.assignee LIKE :search ESCAPE '\\'"
-        " OR t.id LIKE :search ESCAPE '\\')"
+        " OR t.id LIKE :search ESCAPE '\\'"
+        " OR EXISTS (SELECT 1 FROM task_comments c"
+        " WHERE c.task_id = t.id AND c.body LIKE :search ESCAPE '\\'))"
     )
 
 
