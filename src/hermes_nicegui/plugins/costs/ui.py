@@ -116,6 +116,15 @@ def _render_summary(provider: CostProvider, result: object) -> None:
             ui.badge(str(result), color="amber")
         else:
             summary: CostSummary = result  # type: ignore[assignment]
+            show_funds = summary.funds_remaining is not None
+            if show_funds:
+                ui.label(
+                    f"{_money(summary.funds_remaining, summary.currency)} remaining"
+                ).classes("text-2xl")
+                if summary.funds_total is not None:
+                    ui.label(
+                        f"of {_money(summary.funds_total, summary.currency)} prepaid credits"
+                    ).classes("text-sm opacity-70")
             if summary.total is not None:
                 ui.label(
                     f"{_money(summary.remaining, summary.currency)} remaining this month"
@@ -154,7 +163,9 @@ def _render_summary(provider: CostProvider, result: object) -> None:
                             f"{_time_left(month_window.resets_at, now)} · {_pct(elapsed):.0f}% elapsed"
                         ).classes("text-xs opacity-70")
             elif summary.used is not None:
-                ui.label(f"{_money(summary.used, summary.currency)} this month").classes("text-2xl")
+                ui.label(f"{_money(summary.used, summary.currency)} this month").classes(
+                    "text-lg" if show_funds else "text-2xl"
+                )
             for window in summary.windows:
                 if window.limit is not None:
                     text = (

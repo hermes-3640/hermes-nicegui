@@ -34,7 +34,10 @@ async def test_openrouter_summary_uses_periods() -> None:
                     "usage_weekly": 25.5,
                     "usage_daily": 4.25,
                 }
-            }
+            },
+            "https://openrouter.ai/api/v1/credits": {
+                "data": {"total_credits": 100.0, "total_usage": 30.0}
+            },
         }
     )
     provider = OpenRouterProvider(env_file="/missing", client=client)
@@ -44,6 +47,8 @@ async def test_openrouter_summary_uses_periods() -> None:
     assert summary.used == 106.75
     assert summary.total is None
     assert summary.remaining is None
+    assert summary.funds_total == 100.0
+    assert summary.funds_remaining == 70.0
     assert [(window.label, window.used) for window in summary.windows] == [
         ("This month", 106.75),
         ("This week", 25.5),
@@ -51,6 +56,62 @@ async def test_openrouter_summary_uses_periods() -> None:
     ]
     assert len(summary.windows) == 3
     assert summary.currency == "USD"
+    await client.aclose()
+
+
+async def test_openrouter_summary_ignores_credits_failure() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://openrouter.ai/api/v1/credits":
+            raise httpx.ConnectError("no route", request=request)
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "usage": 999.0,
+                    "usage_monthly": 5.0,
+                    "usage_weekly": 2.0,
+                    "usage_daily": 1.0,
+                }
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = OpenRouterProvider(env_file="/missing", client=client)
+    provider.key = "sk-or-v1-0123456789abcdef0123456789abcdef"
+    provider.available = True
+    summary = await provider.summary()
+    assert summary.used == 5.0
+    assert summary.funds_total is None
+    assert summary.funds_remaining is None
+    assert summary.note is None
+    await client.aclose()
+
+
+async def test_openrouter_summary_pay_as_you_go() -> None:
+    client = _client(
+        {
+            "https://openrouter.ai/api/v1/key": {
+                "data": {
+                    "usage": 999.0,
+                    "usage_monthly": 3.0,
+                    "usage_weekly": 1.0,
+                    "usage_daily": 0.5,
+                }
+            },
+            "https://openrouter.ai/api/v1/credits": {
+                "data": {"total_credits": None, "has_payment_method": True}
+            },
+        }
+    )
+    provider = OpenRouterProvider(env_file="/missing", client=client)
+    provider.key = "sk-or-v1-0123456789abcdef0123456789abcdef"
+    provider.available = True
+    summary = await provider.summary()
+    assert summary.used == 3.0
+    assert summary.funds_total is None
+    assert summary.funds_remaining is None
+    assert summary.note is not None
+    assert "Pay-as-you-go" in summary.note
     await client.aclose()
 
 

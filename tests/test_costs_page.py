@@ -24,12 +24,21 @@ from hermes_nicegui.plugins.costs.logic import (
 class FakeProvider(CostProvider):
     """Small deterministic provider for page tests."""
 
-    def __init__(self, label: str, failing: bool = False, degraded: bool = False) -> None:
+    def __init__(
+        self,
+        label: str,
+        failing: bool = False,
+        degraded: bool = False,
+        funds_total: float | None = None,
+        funds_remaining: float | None = None,
+    ) -> None:
         self.name = label.lower().replace(" ", "-")
         self.label = label
         self.available = True
         self.failing = failing
         self.degraded = degraded
+        self.funds_total = funds_total
+        self.funds_remaining = funds_remaining
 
     async def summary(self) -> CostSummary:
         if self.failing:
@@ -40,6 +49,8 @@ class FakeProvider(CostProvider):
             used=12.5,
             total=20,
             remaining=7.5,
+            funds_total=self.funds_total,
+            funds_remaining=self.funds_remaining,
             as_of=datetime.now(UTC),
             degraded=self.degraded,
             windows=[
@@ -94,6 +105,17 @@ async def test_costs_page_isolates_provider_errors(user: User, context: PluginCo
     await user.should_see("$7.50 remaining this month")
     await user.should_see("Broken")
     await user.should_see("provider failed")
+
+
+async def test_costs_page_shows_prepaid_funds(user: User, context: PluginContext) -> None:
+    plugin = CostsPlugin(
+        context,
+        providers=[FakeProvider("Test provider", funds_total=10.0, funds_remaining=3.0)],
+    )
+    web.build(context, [plugin])
+    await user.open("/costs")
+    await user.should_see("$3.00 remaining")
+    await user.should_see("of $10.00 prepaid credits")
 
 
 async def test_costs_page_marks_degraded_summary(user: User, context: PluginContext) -> None:

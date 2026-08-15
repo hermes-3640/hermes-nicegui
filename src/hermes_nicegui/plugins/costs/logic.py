@@ -36,6 +36,8 @@ class CostSummary:
     used: float | None = None
     total: float | None = None
     remaining: float | None = None
+    funds_total: float | None = None
+    funds_remaining: float | None = None
     currency: str = "USD"
     as_of: datetime | None = None
     note: str | None = None
@@ -130,17 +132,24 @@ class OpenRouterProvider(CostProvider):
         return payload
 
     async def summary(self) -> CostSummary:
-        """Return current OpenRouter period usage."""
+        """Return current OpenRouter period usage and prepaid balance."""
         if not self.available or self.key is None:
             raise CostProviderError("OpenRouter is not configured")
-        data = (await self._get("https://openrouter.ai/api/v1/key"))["data"]
+        key_result, credits_result = await asyncio.gather(
+            self._get("https://openrouter.ai/api/v1/key"),
+            self._get("https://openrouter.ai/api/v1/credits"),
+            return_exceptions=True,
+        )
+        if isinstance(key_result, Exception):
+            raise CostProviderError("OpenRouter usage response is incomplete") from key_result
+        data = key_result["data"]
         try:
             usage_monthly = float(data["usage_monthly"])
             usage_weekly = float(data["usage_weekly"])
             usage_daily = float(data["usage_daily"])
         except (KeyError, TypeError, ValueError) as exc:
             raise CostProviderError("OpenRouter usage response is incomplete") from exc
-        return CostSummary(
+        summary = CostSummary(
             provider=self.name,
             label=self.label,
             used=usage_monthly,
@@ -151,6 +160,31 @@ class OpenRouterProvider(CostProvider):
                 CostWindow("Today", used=usage_daily),
             ],
         )
+        self._apply_funds(summary, credits_result)
+        return summary
+
+    def _apply_funds(self, summary: CostSummary, result: object) -> None:
+        """Populate prepaid-balance fields from the credits endpoint, if available."""
+        if isinstance(result, Exception) or not isinstance(result, dict):
+            return
+        data = result.get("data")
+        if not isinstance(data, dict):
+            return
+        total_credits = data.get("total_credits")
+        if total_credits is not None:
+            try:
+                total = float(total_credits)
+            except (TypeError, ValueError):
+                return
+            try:
+                used = float(data.get("total_usage") or 0)
+            except (TypeError, ValueError):
+                used = 0.0
+            summary.funds_total = total
+            summary.funds_remaining = max(0.0, total - used)
+            return
+        if summary.note is None and data.get("has_payment_method") is True:
+            summary.note = "Pay-as-you-go account — no prepaid balance"
 
     async def usage(self, limit: int = 50) -> list[CostEntry]:
         """Return OpenRouter period usage totals."""
