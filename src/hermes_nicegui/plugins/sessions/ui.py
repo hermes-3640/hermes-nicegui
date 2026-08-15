@@ -249,12 +249,22 @@ def _chat_bubble_shell(icon: str, color: str, sender: str, timestamp: float | No
     through :func:`_chat_bubble` like any other historical message -- there's
     nothing that marks it as special past this one render.
     """
-    entry = ui.timeline_entry(icon=icon, color=color)
+    entry = ui.timeline_entry(icon=icon, color=color).mark("live-reply")
     _icon_tooltip(entry, timestamp)
     with entry.add_slot("subtitle"):
         ui.label(sender).classes("text-xs font-bold w-full")
     with entry, ui.card().props("flat bordered").classes("w-fit max-w-full q-mt-xs q-mb-md"):
         return ui.markdown()
+
+
+def _timeline_entry_of(element: ui.element) -> ui.timeline_entry | None:
+    """Find the timeline entry containing a nested live element."""
+    current: ui.element | None = element
+    while current is not None:
+        if isinstance(current, ui.timeline_entry):
+            return current
+        current = current.parent_slot.parent if current.parent_slot is not None else None
+    return None
 
 
 def _live_body_entry(
@@ -273,10 +283,12 @@ class _LiveToolEntry:
 
     def __init__(
         self,
+        entry: ui.timeline_entry,
         row: ui.row,
         spinner: ui.spinner,
         label: ui.label,
     ) -> None:
+        self.entry = entry
         self.row = row
         self.spinner = spinner
         self.label = label
@@ -295,7 +307,7 @@ def _live_tool_entry(
         with ui.row().classes("items-center gap-2 text-xs w-full") as row:
             spinner = ui.spinner(size="sm")
             label = ui.label(label_text)
-    return _LiveToolEntry(row, spinner, label)
+    return _LiveToolEntry(entry, row, spinner, label)
 
 
 def _chat_bubble(
@@ -906,6 +918,22 @@ def register_pages(plugin: Plugin) -> None:
                                         str(args) if args else None,
                                         timestamp,
                                     )
+                                if reply_md is not None:
+                                    reply_entry = _timeline_entry_of(reply_md)
+                                    timeline_el = _timeline()
+                                    if reply_entry is not None:
+                                        try:
+                                            reply_index = next(
+                                                i
+                                                for i, child in enumerate(
+                                                    timeline_el.default_slot.children
+                                                )
+                                                if child is reply_entry
+                                            )
+                                        except StopIteration:
+                                            pass
+                                        else:
+                                            active_tool.entry.move(timeline_el, reply_index)
                                 status_row.set_visibility(False)
                                 _scroll_to_bottom(transcript)
                             elif event.event in {"tool.completed", "tool.failed"}:

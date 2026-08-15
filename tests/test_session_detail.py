@@ -90,6 +90,48 @@ async def test_live_tool_call_renders_then_completes(
     await user.should_see(marker="live-tool-done", retries=20)
 
 
+async def test_live_tool_call_precedes_streamed_reply(
+    user: User, context: PluginContext, hermes
+) -> None:
+    hermes.stream_events = [
+        ("run.started", {"run_id": "run_order"}),
+        ("message.started", {"message": {"id": 20, "role": "assistant"}}),
+        ("assistant.delta", {"message_id": 20, "delta": "Let me check that"}),
+        (
+            "tool.started",
+            {
+                "message_id": 20,
+                "tool_name": "terminal",
+                "args": '{"command": "ls"}',
+            },
+        ),
+        ("tool.completed", {"message_id": 20, "tool_name": "terminal"}),
+        ("assistant.delta", {"message_id": 20, "delta": " and here is the result"}),
+        (
+            "assistant.completed",
+            {"message_id": 20, "content": "Let me check that and here is the result"},
+        ),
+        ("run.completed", {"completed": True, "usage": {}}),
+        ("done", {}),
+    ]
+    web.build(context, [SessionsPlugin(context)])
+    await user.open("/sessions/sess-1")
+    await user.should_see("How do I access your API?")
+
+    user.find(marker="chat-input").type("check ordering")
+    user.find(marker="chat-send").click()
+
+    await user.should_see(marker="live-tool", retries=20)
+    await user.should_see(marker="live-reply", retries=20)
+    timeline = next(iter(user.find(kind=ui.timeline).elements))
+    marked = [
+        child._props.get("mark") or " ".join(child._markers)
+        for child in timeline.default_slot.children
+    ]
+    assert marked.index("live-tool") < marked.index("live-reply")
+    await user.should_see("terminal:")
+
+
 async def test_run_completed_reconciles_authoritative_transcript(
     user: User, context: PluginContext, hermes
 ) -> None:
