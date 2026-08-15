@@ -340,7 +340,7 @@ async def test_running_session_shows_indicator(user: User, context: PluginContex
     await user.should_see("sequential tool running")
 
 
-async def test_stop_button_visible_for_foreign_running_session(
+async def test_stop_button_stops_foreign_running_session(
     user: User, context: PluginContext, hermes
 ) -> None:
     web.build(context, [SessionsPlugin(context)])
@@ -348,9 +348,10 @@ async def test_stop_button_visible_for_foreign_running_session(
     await user.should_see("Running")
 
     user.find(marker="chat-stop").click()
-    await asyncio.sleep(0.1)
+    await asyncio.sleep(0.3)
 
     assert hermes.stop_session_calls == ["sess-1"]
+    assert hermes.stop_calls == []
     await user.should_not_see(marker="session-running", retries=20)
 
 
