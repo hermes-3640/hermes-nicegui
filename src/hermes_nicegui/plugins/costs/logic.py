@@ -38,6 +38,7 @@ class CostSummary:
     currency: str = "USD"
     as_of: datetime | None = None
     note: str | None = None
+    degraded: bool = False
     windows: list[CostWindow] = field(default_factory=list)
 
 
@@ -459,6 +460,7 @@ class OpenCodeGoProvider(CostProvider):
             )
             fallback = await local.summary()
             fallback.note = "Server usage unavailable — estimated from local session records"
+            fallback.degraded = True
             return fallback
 
     async def usage(self, limit: int = 50) -> list[CostEntry]:

@@ -22,11 +22,12 @@ from hermes_nicegui.plugins.costs.logic import (
 class FakeProvider(CostProvider):
     """Small deterministic provider for page tests."""
 
-    def __init__(self, label: str, failing: bool = False) -> None:
+    def __init__(self, label: str, failing: bool = False, degraded: bool = False) -> None:
         self.name = label.lower().replace(" ", "-")
         self.label = label
         self.available = True
         self.failing = failing
+        self.degraded = degraded
 
     async def summary(self) -> CostSummary:
         if self.failing:
@@ -38,6 +39,7 @@ class FakeProvider(CostProvider):
             total=20,
             remaining=7.5,
             as_of=datetime.now(UTC),
+            degraded=self.degraded,
             windows=[
                 CostWindow("This month", used=12.5, limit=20, remaining=7.5),
             ],
@@ -63,6 +65,7 @@ async def test_costs_page_renders_provider_and_usage(user: User, context: Plugin
     await user.should_see("Costs")
     await user.should_see("Test provider")
     await user.should_see("$7.50 remaining this month")
+    await user.should_see("63% used this month")
     await user.should_see("This month: $7.50 remaining of $20.00")
     await user.should_see("Test provider usage")
     await user.should_not_see("all time")
@@ -80,3 +83,10 @@ async def test_costs_page_isolates_provider_errors(user: User, context: PluginCo
     await user.should_see("$7.50 remaining this month")
     await user.should_see("Broken")
     await user.should_see("provider failed")
+
+
+async def test_costs_page_marks_degraded_summary(user: User, context: PluginContext) -> None:
+    plugin = CostsPlugin(context, providers=[FakeProvider("Degraded", degraded=True)])
+    web.build(context, [plugin])
+    await user.open("/costs")
+    await user.should_see("NOT your plan total")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 
 from nicegui import ui
 
@@ -72,6 +73,11 @@ async def _empty_usage() -> list[CostEntry]:
 
 def _render_summary(provider: CostProvider, result: object) -> None:
     with ui.card().classes("min-w-64 flex-1"):
+        if isinstance(result, CostSummary) and result.degraded:
+            ui.badge(
+                "Server usage unavailable — showing local session estimate, NOT your plan total",
+                color="amber",
+            )
         ui.label(provider.label).classes("text-lg font-medium")
         if not provider.available:
             ui.label("not configured (missing key / no data file)").classes("text-sm opacity-60")
@@ -84,6 +90,9 @@ def _render_summary(provider: CostProvider, result: object) -> None:
                     f"{_money(summary.remaining, summary.currency)} remaining this month"
                 ).classes("text-2xl")
                 ui.label(f"of {_money(summary.total, summary.currency)}")
+                if not summary.degraded and summary.used is not None and summary.total > 0:
+                    used_pct = math.floor(summary.used / summary.total * 100 + 0.5)
+                    ui.label(f"{used_pct:.0f}% used this month").classes("text-xl")
                 ui.linear_progress(
                     max(0.0, min(1.0, (summary.remaining or 0) / summary.total)), show_value=False
                 )

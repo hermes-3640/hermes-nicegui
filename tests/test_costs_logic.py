@@ -249,6 +249,7 @@ async def test_opencode_go_provider_falls_back_to_local(tmp_path: Path) -> None:
     provider.local_db = str(db)
     summary = await provider.summary()
     assert summary.note.startswith("Server usage unavailable")
+    assert summary.degraded is True
     assert summary.used == 2.5
     await client.aclose()
 
