@@ -636,3 +636,11 @@ class HermesClient:
         those as already-stopped.
         """
         return await self._request("POST", f"/v1/runs/{run_id}/stop")
+
+    async def stop_session(self, session_id: str) -> dict[str, Any]:
+        """Interrupt a running agent turn in a session from any surface.
+
+        The gateway answers 409 ``session_not_running`` when the session has
+        no live turn.
+        """
+        return await self._request("POST", f"/api/sessions/{session_id}/stop")

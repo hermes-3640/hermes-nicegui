@@ -73,6 +73,12 @@ async def test_delete_session(client: HermesClient) -> None:
     assert await client.delete_session("sess-1") is True
 
 
+async def test_stop_session(client: HermesClient, hermes: FakeHermes) -> None:
+    result = await client.stop_session("sess-1")
+    assert result == {"session_id": "sess-1", "status": "stopping"}
+    assert hermes.stop_session_calls == ["sess-1"]
+
+
 async def test_health(client: HermesClient) -> None:
     # our fake returns 404 for /health; ensure a HermesError is raised cleanly
     with pytest.raises(HermesError):

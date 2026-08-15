@@ -875,7 +875,7 @@ def register_pages(plugin: Plugin) -> None:
                 """
                 nonlocal session, current_run_id
                 current_run_id = None
-                stop_button.set_visibility(True)
+                _update_stop_visibility()
                 _update_running_indicator(True, "Thinking…")
                 sent_at = datetime.now().timestamp()
                 turn_start = len(loaded_messages)
@@ -1017,7 +1017,7 @@ def register_pages(plugin: Plugin) -> None:
                         ui.notify(f"Message failed: {exc}", type="negative")
                 finally:
                     current_run_id = None
-                    stop_button.set_visibility(False)
+                    _update_stop_visibility()
                     message_input.run_method("focus")
 
                 if not reconciled and not user_bubble_shown:
@@ -1066,28 +1066,38 @@ def register_pages(plugin: Plugin) -> None:
                     _update_running_indicator(
                         is_running(session), session.last_activity_description
                     )
+                    _update_stop_visibility()
 
             async def _do_stop() -> None:
-                nonlocal queued_text, stream_task
-                if not streaming:
-                    return
-                run_id = current_run_id
-                if run_id:
+                nonlocal queued_text, stream_task, session
+                if streaming:
+                    run_id = current_run_id
+                    if run_id:
+                        try:
+                            await client.stop_run(run_id)
+                        except HermesError as exc:
+                            ui.notify(f"Stop request failed: {exc}", type="warning")
+                    # Return anything queued to the box so it is never swallowed.
+                    if queued_text:
+                        message_input.set_value(queued_text)
+                        queued_text = None
+                    # Abort the local stream. The gateway also treats an SSE client
+                    # disconnect as an interrupt, so this covers the brief window
+                    # before run.started delivered a run_id.
+                    task = stream_task
+                    if task is not None and not task.done():
+                        task.cancel()
+                    ui.notify("Stopped", type="info")
+                elif is_running(session):
                     try:
-                        await client.stop_run(run_id)
+                        await client.stop_session(session_id)
                     except HermesError as exc:
                         ui.notify(f"Stop request failed: {exc}", type="warning")
-                # Return anything queued to the box so it is never swallowed.
-                if queued_text:
-                    message_input.set_value(queued_text)
-                    queued_text = None
-                # Abort the local stream. The gateway also treats an SSE client
-                # disconnect as an interrupt, so this covers the brief window
-                # before run.started delivered a run_id.
-                task = stream_task
-                if task is not None and not task.done():
-                    task.cancel()
-                ui.notify("Stopped", type="info")
+                        return
+                    ui.notify("Stopped", type="info")
+                    await _refresh_session_state()
+                else:
+                    return
 
             def _stop() -> None:
                 _run_in_client(_do_stop)
@@ -1192,7 +1202,11 @@ def register_pages(plugin: Plugin) -> None:
                         .props("round dense")
                         .mark("chat-stop")
                     )
-                    stop_button.set_visibility(False)
+
+                    def _update_stop_visibility() -> None:
+                        stop_button.set_visibility(streaming or is_running(session))
+
+                    _update_stop_visibility()
                     ui.button(icon="send", on_click=lambda: _run_in_client(send)).props(
                         "round dense"
                     ).mark("chat-send")
@@ -1207,6 +1221,7 @@ def register_pages(plugin: Plugin) -> None:
                     return
                 session = fresh
                 _update_running_indicator(is_running(session), session.last_activity_description)
+                _update_stop_visibility()
                 stats_label.set_text(_stats_text())
 
             ui.timer(5.0, lambda: _run_in_client(_refresh_session_state))

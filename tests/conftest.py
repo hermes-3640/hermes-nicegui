@@ -78,9 +78,11 @@ class FakeHermes:
         # records every run id a stop was requested for.
         self.stream_delay: float = 0.0
         self.stop_calls: list[str] = []
+        self.stop_session_calls: list[str] = []
         self.reset()
 
     def reset(self) -> None:
+        self.stop_session_calls = []
         self.sessions = [
             {
                 "id": "sess-1",
@@ -229,6 +231,24 @@ class FakeHermes:
             self.stop_calls.append(run_id)
             self.stream_delay = 0.0
             return self._json({"run_id": run_id, "status": "stopping"})
+        if method == "POST" and path.startswith("/api/sessions/") and path.endswith("/stop"):
+            sid = path.split("/")[3]
+            self.stop_session_calls.append(sid)
+            # Simulate the gateway clearing the activity label.
+            for session in self.sessions:
+                if session["id"] == sid:
+                    session["last_activity_description"] = ""
+                    session["last_activity_provenance"] = "unknown"
+            if self._state_db_path().exists():
+                con = sqlite3.connect(self._state_db_path())
+                con.execute(
+                    "UPDATE sessions SET last_activity_description = '', "
+                    "last_activity_provenance = 'unknown' WHERE id = ?",
+                    (sid,),
+                )
+                con.commit()
+                con.close()
+            return self._json({"session_id": sid, "status": "stopping"})
         if method == "GET" and path == "/api/jobs":
             return self._json({"jobs": self.jobs})
         if method == "POST" and path == "/api/jobs":
