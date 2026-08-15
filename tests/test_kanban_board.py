@@ -84,6 +84,28 @@ async def test_filter_tabs_order_review_before_blocked(
     assert names.index("review") < names.index("blocked")
 
 
+async def test_stage_help_expansion_lists_canonical_columns(
+    user: User, context: PluginContext, kanban_client: KanbanClient
+) -> None:
+    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    await user.open("/kanban")
+
+    expansion = cast(ui.expansion, next(iter(user.find(marker="stage-help-expansion").elements)))
+    rows = expansion.default_slot.children
+    assert len(rows) == 8
+    labels = [cast(ui.label, row.default_slot.children[1]).text.split(" — ", 1)[0] for row in rows]
+    assert labels == [
+        "Triage",
+        "To Do",
+        "Scheduled",
+        "Ready",
+        "Running",
+        "Review",
+        "Blocked",
+        "Done",
+    ]
+
+
 async def test_create_task_dialog_adds_card(
     user: User, context: PluginContext, kanban_client: KanbanClient
 ) -> None:

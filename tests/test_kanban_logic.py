@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from hermes_nicegui.plugins.kanban.logic import (
     CANONICAL_COLUMNS,
+    STAGE_HELP,
     column_meta,
     fmt_epoch,
     fmt_priority,
@@ -39,3 +40,7 @@ def test_canonical_columns_has_eight_statuses() -> None:
     assert "ready" in CANONICAL_COLUMNS
     assert "triage" in CANONICAL_COLUMNS
     assert CANONICAL_COLUMNS.index("review") < CANONICAL_COLUMNS.index("blocked")
+
+
+def test_stage_help_covers_every_canonical_column() -> None:
+    assert all(STAGE_HELP.get(status) for status in CANONICAL_COLUMNS)

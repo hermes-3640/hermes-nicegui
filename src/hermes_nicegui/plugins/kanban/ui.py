@@ -55,6 +55,7 @@ from hermes_nicegui.plugin import Plugin
 from hermes_nicegui.plugins.kanban.gateway import Comment, KanbanError, Task
 from hermes_nicegui.plugins.kanban.logic import (
     CANONICAL_COLUMNS,
+    STAGE_HELP,
     column_meta,
     fmt_epoch,
     fmt_epoch_age,
@@ -231,6 +232,17 @@ def register_pages(plugin: Plugin) -> None:
                 .classes("w-full")
                 .mark("kanban-search")
             )
+
+            with (
+                ui.expansion("What each stage is for", icon="help_outline")
+                .classes("w-full")
+                .mark("stage-help-expansion")
+            ):
+                for name in CANONICAL_COLUMNS:
+                    label, icon, color = column_meta(name)
+                    with ui.row().classes("items-center gap-2"):
+                        ui.icon(icon, color=color)
+                        ui.label(f"{label} — {STAGE_HELP[name]}")
 
             list_container = ui.list().props("separator").classes("w-full")
 

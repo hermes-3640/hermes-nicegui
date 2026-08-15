@@ -1,4 +1,4 @@
-"""Pure helpers for the kanban plugin: no NiceGUI, no I/O.
+"""Pure helpers and board-stage metadata for the kanban plugin: no NiceGUI, no I/O.
 
 Mirrors ``plugins/cron/logic.py``'s split, except task timestamps from the
 dashboard API are Unix epoch seconds (``created_at: 1786668908``) rather than
@@ -52,6 +52,32 @@ CANONICAL_COLUMNS = [
     "blocked",
     "done",
 ]
+
+STAGE_HELP: dict[str, str] = {
+    "triage": (
+        "Inbox for new tasks — an empty body can be auto-fleshed-out by the specifier, "
+        "which then promotes the task to To Do."
+    ),
+    "todo": (
+        "Specified, but not ready to run — waits here while its parent dependencies are open, "
+        "then auto-promotes to Ready."
+    ),
+    "scheduled": "Parked on the calendar — waiting on time, not on human input.",
+    "ready": (
+        "Picked up by the live dispatcher (usually within ~60s), which claims it and spawns a "
+        "real agent run."
+    ),
+    "running": "A profile has claimed the task and an agent is actively working on it right now.",
+    "review": (
+        "Implementation is done and handed off — a reviewer approves it (→ Done) or sends it "
+        "back with requested changes."
+    ),
+    "blocked": (
+        "Stuck and waiting on something external — a human decision, missing credentials, a "
+        "dependency, or a transient failure. Unblock to re-queue it."
+    ),
+    "done": "Finished and accepted — the work is complete and the task is closed.",
+}
 
 _COLUMN_META: dict[str, tuple[str, str, str]] = {
     "triage": ("Triage", "inbox", "grey"),
