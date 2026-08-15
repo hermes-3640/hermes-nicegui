@@ -140,21 +140,19 @@ def _render_summary(provider: CostProvider, result: object) -> None:
                     and month_window.limit > 0
                     else None
                 )
-                with ui.row().classes("w-full gap-2 items-end"):
+                with ui.column().classes("w-full gap-1"):
                     if used_frac is not None:
-                        with ui.column().classes("flex-1 gap-0"):
-                            ui.linear_progress(used_frac, show_value=False)
-                            ui.label(f"{_pct(used_frac):.0f}% used").classes("text-xs opacity-70")
+                        ui.linear_progress(used_frac, show_value=False)
+                        ui.label(f"{_pct(used_frac):.0f}% used").classes("text-xs opacity-70")
                     if (
                         elapsed is not None
                         and month_window is not None
                         and month_window.resets_at is not None
                     ):
-                        with ui.column().classes("flex-1 gap-0"):
-                            ui.linear_progress(elapsed, show_value=False, color="amber")
-                            ui.label(
-                                f"{_time_left(month_window.resets_at, now)} · {_pct(elapsed):.0f}% elapsed"
-                            ).classes("text-xs opacity-70")
+                        ui.linear_progress(elapsed, show_value=False, color="amber")
+                        ui.label(
+                            f"{_time_left(month_window.resets_at, now)} · {_pct(elapsed):.0f}% elapsed"
+                        ).classes("text-xs opacity-70")
             elif summary.used is not None:
                 ui.label(f"{_money(summary.used, summary.currency)} this month").classes("text-2xl")
             for window in summary.windows:
