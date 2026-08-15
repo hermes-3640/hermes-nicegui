@@ -11,6 +11,7 @@ from hermes_nicegui import web
 from hermes_nicegui.plugin import PluginContext
 from hermes_nicegui.plugins.kanban import KanbanPlugin
 from hermes_nicegui.plugins.kanban.gateway import KanbanClient
+from hermes_nicegui.plugins.sessions import SessionsPlugin
 
 TASK_ID = "t_1"
 
@@ -90,14 +91,97 @@ async def test_add_comment_appends_to_list(
     await user.should_see("On it now", retries=10)
 
 
-async def test_delete_navigates_to_board(
-    user: User, context: PluginContext, kanban_client: KanbanClient
+async def test_delete_navigates_to_origin_session(
+    user: User,
+    context: PluginContext,
+    kanban_client: KanbanClient,
+    hermes_home,
 ) -> None:
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    """Deleting a task lands back on the task's session page -- the origin
+    session (`sess-99`), since the fixture task has no worker session --
+    instead of always dropping to the board."""
+    import sqlite3
+
+    con = sqlite3.connect(hermes_home / "state.db")
+    con.execute(
+        "INSERT INTO sessions (id, title, source, model, started_at, ended_at, end_reason,"
+        " message_count, tool_call_count, input_tokens, output_tokens, estimated_cost_usd,"
+        " pinned, archived, last_activity_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "sess-99", "Session for deleted task", "kanban", "deepseek-v4-flash",
+            None, None, None, 0, 0, 0, 0, None, 0, 0, 1786620900.0,
+        ),
+    )
+    con.commit()
+    con.close()
+
+    web.build(
+        context,
+        [
+            KanbanPlugin(context, kanban_client=kanban_client),
+            SessionsPlugin(context),
+        ],
+    )
     await user.open(f"/kanban/{TASK_ID}")
     await user.should_see("Fix flaky test")
     user.find(marker="delete-task-button").click()
+    await user.should_see("Session for deleted task", retries=10)
+
+
+async def test_delete_without_session_falls_back_to_board(
+    user: User,
+    context: PluginContext,
+    kanban_client: KanbanClient,
+    fake_kanban,
+) -> None:
+    """A task with no `session_id` (CLI/dashboard-created) still falls back to
+    the board after delete."""
+    fake_kanban.insert_task(
+        {
+            "id": "t_nosess",
+            "title": "No-session task",
+            "body": "",
+            "assignee": "default",
+            "status": "ready",
+            "priority": 2,
+            "created_at": 1786620003,
+            "started_at": None,
+            "completed_at": None,
+            "consecutive_failures": 0,
+            "last_failure_error": None,
+            "current_run_id": None,
+            "session_id": None,
+            "latest_summary": None,
+            "comment_count": 0,
+        }
+    )
+    fake_kanban.tasks.append(
+        {
+            "id": "t_nosess",
+            "title": "No-session task",
+            "body": "",
+            "assignee": "default",
+            "status": "ready",
+            "priority": 2,
+            "created_at": 1786620003,
+            "started_at": None,
+            "completed_at": None,
+            "consecutive_failures": 0,
+            "last_failure_error": None,
+            "current_run_id": None,
+            "session_id": None,
+            "latest_summary": None,
+            "comment_count": 0,
+        }
+    )
+
+    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    await user.open("/kanban/t_nosess")
+    await user.should_see("No-session task")
+    user.find(marker="delete-task-button").click()
     await user.should_see("Kanban board", retries=10)
+    await user.should_not_see("No-session task", retries=10)
 
 
 async def test_view_session_button_shown_when_task_has_session(

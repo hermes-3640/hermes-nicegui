@@ -502,7 +502,21 @@ def register_pages(plugin: Plugin) -> None:
                     _move_status(task_id, event.value, apply_update)
 
             move_select.on_value_change(on_move_change)
-            delete_button.on_click(lambda: _delete_task(task_id, lambda: ui.navigate.to("/kanban")))
+            delete_button.on_click(
+                lambda: _delete_task(
+                    task_id,
+                    # After a delete, land back where the task's work
+                    # happened: worker session first, origin session second,
+                    # board as fallback (mirrors "View session" precedence).
+                    lambda: ui.navigate.to(
+                        f"/sessions/{detail.worker_session_id}"
+                        if detail.worker_session_id
+                        else f"/sessions/{task.session_id}"
+                        if task.session_id
+                        else "/kanban"
+                    ),
+                )
+            )
 
             title_input = (
                 ui.input("Title", value=task.title)
