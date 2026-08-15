@@ -46,16 +46,6 @@ def _elapsed_fraction(window: CostWindow, now) -> float | None:
     return max(0.0, min(1.0, 1.0 - remaining / window.period.total_seconds()))
 
 
-def _pace(used_pct: float, elapsed_pct: float, margin: float = 5.0) -> tuple[str, str]:
-    """Classify usage against the elapsed quota period."""
-    diff = used_pct - elapsed_pct
-    if diff >= margin:
-        return "behind quota pace", "red"
-    if diff <= -margin:
-        return "ahead of quota pace", "green"
-    return "on quota pace", "amber"
-
-
 def _pct(value: float) -> float:
     """Round a fraction to a whole percentage."""
     return math.floor(value * 100 + 0.5)
@@ -137,37 +127,37 @@ def _render_summary(provider: CostProvider, result: object) -> None:
                 month_window = next(
                     (window for window in summary.windows if window.label == "This month"), None
                 )
-                if (
-                    month_window is not None
-                    and month_window.resets_at is not None
-                ):
-                    elapsed = _elapsed_fraction(month_window, now)
-                    period_text = f"{_time_left(month_window.resets_at, now)} in this quota period"
-                    if elapsed is not None:
-                        period_text += f" · {_pct(elapsed):.0f}% of period elapsed"
-                    with ui.row().classes("items-center gap-2"):
-                        if (
-                            elapsed is not None
-                            and month_window.limit is not None
-                            and month_window.used is not None
-                            and month_window.limit > 0
-                        ):
-                            pace_text, pace_color = _pace(
-                                _pct(month_window.used / month_window.limit), _pct(elapsed)
-                            )
-                            ui.badge(pace_text, color=pace_color)
-                        ui.label(period_text)
-                    if elapsed is not None and elapsed > 0.02 and month_window.used is not None:
-                        ui.label(
-                            f"on pace for {_money(month_window.used / elapsed, summary.currency)} this month"
-                        )
-                ui.linear_progress(
-                    max(0.0, min(1.0, (summary.remaining or 0) / summary.total)), show_value=False
+                elapsed = (
+                    _elapsed_fraction(month_window, now)
+                    if month_window is not None
+                    else None
                 )
+                used_frac = (
+                    max(0.0, min(1.0, month_window.used / month_window.limit))
+                    if month_window is not None
+                    and month_window.used is not None
+                    and month_window.limit is not None
+                    and month_window.limit > 0
+                    else None
+                )
+                with ui.row().classes("w-full gap-2 items-end"):
+                    if used_frac is not None:
+                        with ui.column().classes("flex-1 gap-0"):
+                            ui.linear_progress(used_frac, show_value=False)
+                            ui.label(f"{_pct(used_frac):.0f}% used").classes("text-xs opacity-70")
+                    if (
+                        elapsed is not None
+                        and month_window is not None
+                        and month_window.resets_at is not None
+                    ):
+                        with ui.column().classes("flex-1 gap-0"):
+                            ui.linear_progress(elapsed, show_value=False, color="amber")
+                            ui.label(
+                                f"{_time_left(month_window.resets_at, now)} · {_pct(elapsed):.0f}% elapsed"
+                            ).classes("text-xs opacity-70")
             elif summary.used is not None:
                 ui.label(f"{_money(summary.used, summary.currency)} this month").classes("text-2xl")
             for window in summary.windows:
-                elapsed = _elapsed_fraction(window, now)
                 if window.limit is not None:
                     text = (
                         f"{window.label}: {_money(window.remaining, summary.currency)} remaining "
@@ -177,13 +167,6 @@ def _render_summary(provider: CostProvider, result: object) -> None:
                     text = f"{window.label}: {_money(window.used, summary.currency)} used"
                 if window.resets_at is not None:
                     text += f" · {_time_left(window.resets_at, now)}"
-                if (
-                    window.limit is not None
-                    and window.used is not None
-                    and window.limit > 0
-                    and elapsed is not None
-                ):
-                    text += f" · {_pct(window.used / window.limit):.0f}% used / {_pct(elapsed):.0f}% elapsed"
                 label = ui.label(text)
                 if window.resets_at is not None:
                     label.tooltip(f"resets {window.resets_at.isoformat(timespec='minutes')}")

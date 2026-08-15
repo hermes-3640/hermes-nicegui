@@ -75,10 +75,8 @@ async def test_costs_page_renders_provider_and_usage(user: User, context: Plugin
     await user.should_see("Test provider")
     await user.should_see("$7.50 remaining this month")
     await user.should_see("63% used this month")
-    await user.should_see("ahead of quota pace")
-    await user.should_see("5d 0h left in this quota period")
-    await user.should_see("on pace for $15.00 this month")
-    await user.should_see("· 63% used / 83% elapsed")
+    await user.should_see("5d 0h left · 83% elapsed")
+    await user.should_see("83% elapsed")
     await user.should_see("This month: $7.50 remaining of $20.00")
     await user.should_see("Test provider usage")
     await user.should_not_see("all time")
@@ -108,7 +106,6 @@ async def test_costs_page_marks_degraded_summary(user: User, context: PluginCont
 def test_quota_pace_helpers() -> None:
     from hermes_nicegui.plugins.costs.ui import (
         _elapsed_fraction,
-        _pace,
         _time_left,
     )
 
@@ -127,6 +124,3 @@ def test_quota_pace_helpers() -> None:
         ),
         now,
     ) == pytest.approx(2 / 3)
-    assert _pace(80, 50) == ("behind quota pace", "red")
-    assert _pace(20, 80) == ("ahead of quota pace", "green")
-    assert _pace(60, 62) == ("on quota pace", "amber")
