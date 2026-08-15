@@ -133,6 +133,37 @@ async def test_board_paginates_with_numbered_pages(
     await user.should_not_see("Fix flaky test", retries=10)
 
 
+async def test_running_task_icon_is_animated(
+    user: User, context: PluginContext, kanban_client: KanbanClient, fake_kanban: FakeKanban
+) -> None:
+    fake_kanban.insert_task(
+        {
+            "id": "t_running",
+            "title": "Long running job",
+            "body": "",
+            "assignee": "default",
+            "status": "running",
+            "priority": 1,
+            "tenant": None,
+            "created_at": 1786620001,
+            "started_at": None,
+            "completed_at": None,
+            "consecutive_failures": 0,
+            "last_failure_error": None,
+            "current_run_id": None,
+            "session_id": None,
+        }
+    )
+    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    await user.open("/kanban")
+
+    icons = user.find(marker="task-status-icon").elements
+    animated = [icon for icon in icons if "kanban-running-icon" in icon.classes]
+    assert len(animated) == 1
+    ready_icon = next(icon for icon in icons if icon not in animated)
+    assert "kanban-running-icon" not in ready_icon.classes
+
+
 async def test_search_filters_board(
     user: User,
     context: PluginContext,

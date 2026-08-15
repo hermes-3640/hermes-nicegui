@@ -64,6 +64,18 @@ from hermes_nicegui.plugins.kanban.logic import (
 )
 from hermes_nicegui.web import frame
 
+_RUNNING_ICON_CSS = """
+@keyframes kanban-running-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.kanban-running-icon {
+  animation: kanban-running-spin 1.5s linear infinite;
+  display: inline-block;
+}
+"""
+
 
 def register_pages(plugin: Plugin) -> None:
     client = plugin.kanban_client  # type: ignore[attr-defined]
@@ -176,6 +188,7 @@ def register_pages(plugin: Plugin) -> None:
 
     @ui.page("/kanban", title="Kanban")
     async def kanban_board_page() -> None:
+        ui.add_css(_RUNNING_ICON_CSS)
         with frame(active="/kanban"):
             with ui.row().classes("w-full items-center gap-2"):
                 ui.label("Kanban board").classes("text-lg")
@@ -229,7 +242,9 @@ def register_pages(plugin: Plugin) -> None:
                     .mark("task-card")
                 ):
                     with ui.item_section().props("avatar"):
-                        ui.icon(icon, color=color)
+                        status_icon = ui.icon(icon, color=color).mark("task-status-icon")
+                        if task.status == "running":
+                            status_icon.classes("kanban-running-icon")
                     with ui.item_section():
                         ui.item_label(task.title or "(untitled)")
                         ui.item_label(
