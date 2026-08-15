@@ -146,6 +146,12 @@ async def test_opencode_provider(tmp_path: Path) -> None:
         (6, 4),
         (2.5, 2.5),
     ]
+    assert summary.windows[0].resets_at == datetime(2026, 9, 1, tzinfo=UTC)
+    assert summary.windows[0].period == timedelta(days=31)
+    assert summary.windows[1].resets_at == ref + timedelta(days=7)
+    assert summary.windows[1].period == timedelta(days=7)
+    assert summary.windows[2].resets_at == ref + timedelta(hours=5)
+    assert summary.windows[2].period == timedelta(hours=5)
     entries = await provider.usage()
     assert [entry.label for entry in entries] == [
         "other provider",
@@ -208,6 +214,11 @@ async def test_opencode_go_provider_uses_server_usage() -> None:
     ]
     assert all(window.resets_at is not None for window in summary.windows)
     assert isinstance(summary.windows[-1].resets_at, datetime)
+    assert [window.period for window in summary.windows] == [
+        timedelta(hours=5),
+        timedelta(days=7),
+        timedelta(days=30),
+    ]
     assert not hasattr(summary, "all_time")
     assert all(not window.label.lower().startswith("all time") for window in summary.windows)
     await client.aclose()

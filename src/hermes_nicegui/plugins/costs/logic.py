@@ -8,7 +8,7 @@ import os
 import sqlite3
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,7 @@ class CostWindow:
     limit: float | None = None
     remaining: float | None = None
     resets_at: datetime | None = None
+    period: timedelta | None = None
 
 
 @dataclass
@@ -238,6 +239,12 @@ class OpenCodeLocalProvider(CostProvider):
             raise CostProviderError("OpenCode database is not available")
         now = now or datetime.now(UTC)
         month_start = datetime(now.year, now.month, 1, tzinfo=UTC)
+        resets_at = datetime(
+            now.year + (1 if now.month == 12 else 0),
+            (now.month % 12) + 1,
+            1,
+            tzinfo=UTC,
+        )
         try:
             rows = await asyncio.to_thread(
                 self._query_summary, int(month_start.timestamp() * 1000)
@@ -275,18 +282,24 @@ class OpenCodeLocalProvider(CostProvider):
                     used=month_used,
                     limit=self.monthly_limit,
                     remaining=self.monthly_limit - month_used,
+                    resets_at=resets_at,
+                    period=resets_at - month_start,
                 ),
                 CostWindow(
                     "This week",
                     used=week_used,
                     limit=self.weekly_limit,
                     remaining=self.weekly_limit - week_used,
+                    resets_at=now + timedelta(days=7),
+                    period=timedelta(days=7),
                 ),
                 CostWindow(
                     "5-hour window",
                     used=five_hour_used,
                     limit=self.five_hour_limit,
                     remaining=self.five_hour_limit - five_hour_used,
+                    resets_at=now + timedelta(hours=5),
+                    period=timedelta(hours=5),
                 ),
             ],
         )
@@ -432,6 +445,7 @@ class OpenCodeGoProvider(CostProvider):
                         limit=self.five_hour_limit,
                         remaining=self.five_hour_limit - five_hour_used,
                         resets_at=self._parse_resets_at(usage["rolling"]["resetsAt"]),
+                        period=timedelta(hours=5),
                     ),
                     CostWindow(
                         "This week",
@@ -439,6 +453,7 @@ class OpenCodeGoProvider(CostProvider):
                         limit=self.weekly_limit,
                         remaining=self.weekly_limit - week_used,
                         resets_at=self._parse_resets_at(usage["weekly"]["resetsAt"]),
+                        period=timedelta(days=7),
                     ),
                     CostWindow(
                         "This month",
@@ -446,6 +461,8 @@ class OpenCodeGoProvider(CostProvider):
                         limit=self.monthly_limit,
                         remaining=self.monthly_limit - month_used,
                         resets_at=self._parse_resets_at(usage["monthly"]["resetsAt"]),
+                        # The server gives the reset date but not the cycle start; 30 days is the documented approximation.
+                        period=timedelta(days=30),
                     ),
                 ],
             )
