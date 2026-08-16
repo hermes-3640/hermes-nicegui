@@ -82,6 +82,16 @@ def fmt_cost(cost: float | None) -> str:
     return f"${cost:.4f}"
 
 
+def fmt_tokens(count: int) -> str:
+    """Compact token count, e.g. ``12.3k`` -- session totals can run into
+    the hundreds of thousands, where a raw digit count is hard to scan."""
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M"
+    if count >= 1_000:
+        return f"{count / 1_000:.1f}k"
+    return str(count)
+
+
 #: Reserved key in the per-browser ``seen`` map: a timestamp that means
 #: "everything active before this is read", regardless of per-session entries.
 ALL_READ_KEY = "__all__"

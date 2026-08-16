@@ -49,6 +49,7 @@ from hermes_nicegui.plugins.sessions.logic import (
     attachment_block,
     fmt_age,
     fmt_cost,
+    fmt_tokens,
     fmt_ts,
     is_running,
     is_unread,
@@ -205,6 +206,25 @@ class LiveEntry:
     tool_rows: dict[str, LiveToolRow]
 
 
+@dataclass
+class QueuedTurn:
+    """A turn sent while another was still streaming, held for delivery
+    once the current one finishes (see the detail page's ``_queue_message``/
+    ``send``).
+
+    ``local_ids`` names every locally-synthesized message this queued turn
+    owns (one per merged send -- queuing twice concatenates ``text`` but
+    keeps each message's own id, so this can hold more than one). Threaded
+    into the next ``_run_turn`` call as ``own_local_ids`` so *that* turn's
+    own ``run.completed`` reconciliation is what swaps these ids out for
+    their authoritative counterparts -- never the turn that was already
+    streaming when this one was queued.
+    """
+
+    text: str
+    local_ids: list[int]
+
+
 def _collapsible_entry(
     icon: str,
     color: str,
@@ -353,6 +373,29 @@ def _set_content_if_attached(element: ui.markdown, content: str) -> None:
         pass
 
 
+def _oldest_running_call_id(
+    tool_calls: list[dict], tool_status: dict[str, str], tool_name: str | None
+) -> str | None:
+    """Best-effort match for a ``tool.progress``/``tool.completed``/
+    ``tool.failed`` event that carries no ``tool_call_id`` of its own -- the
+    daemon's session chat-stream endpoint never sends one on these events
+    today. Prefers the oldest still-``running`` call with a matching tool
+    name over "last started" (which breaks the moment two tool calls are in
+    flight at once and finish out of start order -- the tool name at least
+    disambiguates the common case of two *different* tools running
+    concurrently). Genuinely ambiguous only when the same tool name is
+    running twice concurrently and they finish out of order, which needs a
+    daemon-side fix (the id-carrying callback exists, just isn't wired into
+    this endpoint) to resolve for good.
+    """
+    running = [c for c in tool_calls if tool_status.get(c.get("id")) == "running"]
+    if tool_name:
+        named = [c for c in running if c.get("function", {}).get("name") == tool_name]
+        if named:
+            return named[0].get("id")
+    return running[0].get("id") if running else None
+
+
 def _chat_bubble(
     icon: str,
     color: str,
@@ -481,25 +524,37 @@ def _tool_round_trip(
     )
 
 
+_NOT_GIVEN: Any = object()
+
+
 def render_transcript_events(
     messages: list[Message],
     *,
     active_id: int | None = None,
     tool_status: dict[str, str] | None = None,
+    last_bubble_id: int | None = _NOT_GIVEN,
+    queued_ids: set[int] | None = None,
 ) -> dict[int, LiveEntry]:
-    """Render the whole transcript as a true, chronological event timeline.
+    """Render one contiguous slice of the transcript as a true, chronological
+    event timeline. Every entry -- chat bubbles included -- collapses to a
+    one-line summary by default (see :func:`_chat_bubble`/
+    :func:`_collapsible_entry`), except the message named by
+    ``last_bubble_id``, which opens automatically so landing on a session (or
+    on a turn still streaming) shows what was last said instead of a wall of
+    collapsed rows. A tool call and its own result (matched by
+    ``tool_call_id``, not just assumed to be the next message) render as one
+    fused entry -- see :func:`_tool_round_trip`.
 
-    The single render path for both historical transcripts and a live SSE
-    turn: every entry is built here, from ``messages`` in buffer order. Every
-    entry -- chat bubbles included -- collapses to a one-line summary by
-    default (see :func:`_chat_bubble`/:func:`_collapsible_entry`), except the
-    *last* message actually said (the tail of ``messages``, which is always
-    the session's most recent when this renders the initial page -- see
-    ``get_messages_page``): that one opens automatically, so loading a
-    session lands on what it last said instead of a wall of collapsed rows.
-    A tool call and its own result (matched by ``tool_call_id``, not just
-    assumed to be the next message) render as one fused entry -- see
-    :func:`_tool_round_trip`.
+    The detail page calls this twice per render: once for the static
+    historical prefix (``active_id=None``), once for the live turn's own
+    tail (``messages`` is just the pending message plus anything queued
+    after it, ``active_id`` set) -- see ``_render_history``/``_render_live``.
+    Because a single call only ever sees *part* of the full buffer, the
+    "most recently said" message can't be derived from ``messages`` alone in
+    that split-call case; callers passing a slice must pass ``last_bubble_id``
+    explicitly (computed from the *whole* buffer). Left unset, it's derived
+    from ``messages`` as before -- direct/test callers passing the full
+    transcript in one call need not care about the split.
 
     ``active_id`` marks the message being streamed right now (the pending
     assistant message). Only that message renders eagerly and open and is
@@ -514,19 +569,25 @@ def render_transcript_events(
     check/error icon beside its label (the same ``_tool_round_trip`` entry
     type as a finished call -- just with a live status glyph). ``None`` means
     no glyph anywhere (pure historical).
+
+    ``queued_ids`` marks user messages sent while another turn was still
+    streaming: each gets a small "Queued -- will send after this turn
+    completes" row under its bubble, dropped once the id is no longer in the
+    set (i.e. once that turn actually starts).
     """
     results_by_call_id = {
         m.tool_call_id: m for m in messages if m.role == "tool" and m.tool_call_id
     }
     consumed_result_ids = {m.id for m in results_by_call_id.values()}
-    last_bubble_id = next(
-        (
-            m.id
-            for m in reversed(messages)
-            if m.role == "user" or (m.role == "assistant" and m.content)
-        ),
-        None,
-    )
+    if last_bubble_id is _NOT_GIVEN:
+        last_bubble_id = next(
+            (
+                m.id
+                for m in reversed(messages)
+                if m.role == "user" or (m.role == "assistant" and m.content)
+            ),
+            None,
+        )
     statuses = tool_status or {}
     handles: dict[int, LiveEntry] = {}
 
@@ -541,6 +602,10 @@ def render_transcript_events(
                 msg.timestamp,
                 default_open=msg.id == last_bubble_id,
             )
+            if queued_ids and msg.id in queued_ids:
+                with ui.row().classes("items-center gap-2 text-xs opacity-60 q-mb-sm"):
+                    ui.icon("schedule")
+                    ui.label("Queued — will send after this turn completes")
 
         elif msg.role == "assistant":
             reasoning_md = None
@@ -807,7 +872,9 @@ def register_pages(plugin: Plugin) -> None:
                 return (
                     f"ID {session.id} · {session.message_count} messages · "
                     f"{session.tool_call_count} tool calls · "
-                    f"cost {fmt_cost(session.estimated_cost_usd)}"
+                    f"cost {fmt_cost(session.estimated_cost_usd)} · "
+                    f"{fmt_tokens(session.input_tokens)} in / "
+                    f"{fmt_tokens(session.output_tokens)} out tokens"
                 )
 
             def _update_running_indicator(active: bool, description: str | None = None) -> None:
@@ -856,6 +923,7 @@ def register_pages(plugin: Plugin) -> None:
             # cleared by a transcript rebuild, so its position on the page is
             # stable across "Load earlier" clicks -- see `_load_earlier`.
             earlier_row = ui.row().classes("w-full justify-center")
+            earlier_button: ui.button | None = None
             transcript = ui.column().classes("w-full")
             timeline: ui.timeline | None = None
             loading_more = False
@@ -869,63 +937,136 @@ def register_pages(plugin: Plugin) -> None:
             streaming = False
             stream_task: asyncio.Task | None = None
             current_run_id: str | None = None
-            queued_text: str | None = None
-            # Live-streaming render state, consumed by `_render_transcript`:
-            # the id of the one assistant message being streamed right now
-            # (rendered eagerly/open with live-update handles) and the
-            # per-tool_call_id status map that turns its tool rows' spinner
-            # into a done/failed glyph. Both are owned by `_run_turn` and
-            # reset to None/{} the moment a turn ends, so every other render
-            # (initial page, "Load earlier", a reconciled turn) is purely
-            # historical.
+            queued_turn: QueuedTurn | None = None
+            # Live-streaming render state, owned by `_run_turn` and reset to
+            # None/{}/0 the moment a turn ends, so every other render (initial
+            # page, "Load earlier", a reconciled turn) is purely historical:
+            # - `active_message_id` / `tool_status`: the id of the one
+            #   assistant message being streamed right now, and its
+            #   per-tool_call_id status map -- consumed by both render halves
+            #   below.
+            # - `pending_index`: this turn's position in `loaded_messages`.
+            #   `loaded_messages[pending_index:]` is exactly "the pending
+            #   message plus anything queued after it" -- see `_render_live`.
+            #   Valid for the whole turn because nothing is ever inserted
+            #   before it while streaming (`_load_earlier` is blocked, see
+            #   `_sync_streaming_controls`).
+            # - `live_entry_mark`: the DOM child index in `timeline` where the
+            #   live region starts -- everything before it is history and is
+            #   never touched by `_render_live`.
             active_message_id: int | None = None
             tool_status: dict[str, str] = {}
+            pending_index = 0
+            live_entry_mark = 0
             # Files picked in the composer, awaiting send: {"name", "path",
             # "size"}. Cleared once they're attached to a message (sent or
             # queued) or individually removed.
             pending_attachments: list[dict[str, Any]] = []
 
+            def _current_last_bubble_id() -> int | None:
+                """The most recent "something said" message across the whole
+                buffer -- computed once from ``loaded_messages`` and threaded
+                into both render halves below, since neither one alone sees
+                the full buffer once history and the live tail render
+                separately (see :func:`_render_history`/:func:`_render_live`)."""
+                return next(
+                    (
+                        m.id
+                        for m in reversed(loaded_messages)
+                        if m.role == "user" or (m.role == "assistant" and m.content)
+                    ),
+                    None,
+                )
+
             def _render_earlier_button() -> None:
+                nonlocal earlier_button
                 earlier_row.clear()
+                earlier_button = None
                 if not has_earlier:
                     return
                 with earlier_row:
-                    ui.button(
-                        "Load earlier messages",
-                        icon="expand_less",
-                        on_click=lambda: _run_in_client(_load_earlier),
-                    ).props("flat dense").mark("load-earlier-button")
+                    earlier_button = (
+                        ui.button(
+                            "Load earlier messages",
+                            icon="expand_less",
+                            on_click=lambda: _run_in_client(_load_earlier),
+                        )
+                        .props("flat dense")
+                        .mark("load-earlier-button")
+                    )
+                    earlier_button.set_enabled(not streaming)
 
-            def _render_transcript() -> dict[int, LiveEntry]:
-                """Rebuild the whole timeline from ``loaded_messages``.
-
-                The single render path: historical and live turns both land
-                here. Returns the live-update handles for the message being
-                streamed (see :func:`render_transcript_events`), empty for a
-                purely historical render.
+            def _render_history() -> None:
+                """Rebuild everything *except* the message currently
+                streaming (if any) -- called only when the historical set
+                itself changes: initial load, "Load earlier", a turn's start
+                (to show its own new user bubble) and a turn's
+                ``run.completed`` reconciliation. Sets `live_entry_mark` so a
+                subsequent :func:`_render_live` knows where its own region
+                starts.
                 """
-                nonlocal timeline
+                nonlocal timeline, live_entry_mark
                 transcript.clear()
-                if not loaded_messages:
+                visible = (
+                    [m for m in loaded_messages if m.id != active_message_id]
+                    if active_message_id is not None
+                    else loaded_messages
+                )
+                if not visible:
                     with transcript:
                         ui.label("No messages yet.")
                     timeline = None
-                    return {}
+                    live_entry_mark = 0
+                    return
                 with transcript, ui.timeline(layout="dense").classes("w-full") as tl:
                     timeline = tl
+                    render_transcript_events(
+                        visible,
+                        last_bubble_id=_current_last_bubble_id(),
+                        queued_ids=set(queued_turn.local_ids) if queued_turn else None,
+                    )
+                live_entry_mark = len(timeline.default_slot.children)
+
+            def _render_live() -> dict[int, LiveEntry]:
+                """Rebuild just the in-flight turn's own rows -- the pending
+                message plus anything queued after it (see `pending_index`)
+                -- in place at the end of the (untouched) history timeline.
+                Cheap regardless of transcript length: this only ever
+                touches entries at or after `live_entry_mark`, never the
+                historical prefix. Returns empty outside a live turn.
+                """
+                if timeline is None or active_message_id is None:
+                    return {}
+                stale = list(timeline.default_slot.children[live_entry_mark:])
+                for entry in stale:
+                    _delete_if_attached(entry)
+                with timeline:
                     return render_transcript_events(
-                        loaded_messages,
+                        loaded_messages[pending_index:],
                         active_id=active_message_id,
                         tool_status=tool_status or None,
+                        last_bubble_id=_current_last_bubble_id(),
+                        queued_ids=set(queued_turn.local_ids) if queued_turn else None,
                     )
 
             _render_earlier_button()
-            _render_transcript()
+            _render_history()
             _scroll_to_bottom(transcript)
+
+            def _sync_streaming_controls() -> None:
+                """Reflect the `streaming` flag on every control it gates --
+                the stop button, and "Load earlier" (which must not run
+                concurrently with a live turn's own DOM rebuild -- see
+                `_render_live`'s history/live split, which assumes nothing
+                is ever inserted before `pending_index`/`live_entry_mark`
+                while a turn is in flight)."""
+                stop_button.set_visibility(streaming or is_running(session))
+                if earlier_button is not None:
+                    earlier_button.set_enabled(not streaming)
 
             async def _load_earlier() -> None:
                 nonlocal has_earlier, loading_more
-                if loading_more or not has_earlier:
+                if loading_more or not has_earlier or streaming:
                     return
                 loading_more = True
                 earlier_row.clear()
@@ -943,7 +1084,7 @@ def register_pages(plugin: Plugin) -> None:
                 finally:
                     loading_more = False
                 _render_earlier_button()
-                _render_transcript()
+                _render_history()
                 # Anchor the view on the load-more control itself (stable
                 # across rebuilds -- see the comment above `earlier_row`)
                 # instead of jumping to the bottom, so the newly-revealed
@@ -951,77 +1092,98 @@ def register_pages(plugin: Plugin) -> None:
                 with earlier_row:
                     ui.run_javascript(f"getHtmlElement({earlier_row.id}).scrollIntoView()")
 
-            def _timeline() -> ui.timeline:
-                """The transcript's live timeline, creating an empty one the
-                first time a chat turn is sent to a session with no history
-                yet (which starts out showing only "No messages yet.")."""
-                nonlocal timeline
-                if timeline is None:
-                    transcript.clear()
-                    with transcript:
-                        timeline = ui.timeline(layout="dense").classes("w-full")
-                return timeline
+            local_id_seq = 0
 
             def _next_local_id() -> int:
                 """A locally-sent turn's messages don't have a real `state.db`
                 row id yet (the CLI/daemon assigns one on write, which this
-                page doesn't re-read). Any id past the current max is safe:
-                it only ever needs to sort after everything already loaded,
-                never to be used as a `before_id` key (that's always
-                `loaded_messages[0]`, the oldest, never these)."""
-                return (loaded_messages[-1].id if loaded_messages else 0) + 1
+                page doesn't re-read). Real ids are always positive
+                (`INTEGER PRIMARY KEY`), so a page-scoped decreasing counter
+                is a namespace disjoint from any real id -- unlike "one past
+                the current max", it can't collide with ids `_load_earlier`
+                prepends from a concurrent task, since it never looks at
+                `loaded_messages` at all."""
+                nonlocal local_id_seq
+                local_id_seq -= 1
+                return local_id_seq
 
             def _append_local_message(
                 role: str, content: str, timestamp: float | None = None
-            ) -> None:
+            ) -> int:
                 """Track a locally-rendered message so a later transcript
-                rebuild ("Load earlier") doesn't clobber it."""
-                loaded_messages.append(
-                    Message(
-                        id=_next_local_id(),
-                        session_id=session_id,
-                        role=role,
-                        content=content,
-                        timestamp=timestamp or datetime.now().timestamp(),
-                    )
+                rebuild ("Load earlier") doesn't clobber it. Returns its id
+                -- callers key turn ownership off this, never off list
+                position (see `QueuedTurn`/`_run_turn`)."""
+                msg = Message(
+                    id=_next_local_id(),
+                    session_id=session_id,
+                    role=role,
+                    content=content,
+                    timestamp=timestamp or datetime.now().timestamp(),
                 )
+                loaded_messages.append(msg)
+                return msg.id
 
             def _queue_message(text: str) -> None:
                 """Mid-turn send: show the message immediately, marked queued,
-                so nothing the user typed is silently swallowed."""
-                nonlocal queued_text
-                queued_text = f"{queued_text}\n{text}".strip() if queued_text else text
-                sent_at = datetime.now().timestamp()
-                with _timeline():
-                    _chat_bubble("person", "primary", "You", text, sent_at)
-                    with ui.row().classes("items-center gap-2 text-xs opacity-60 q-mb-sm"):
-                        ui.icon("schedule")
-                        ui.label("Queued — will send after this turn completes")
-                _scroll_to_bottom(transcript)
-                _append_local_message("user", text, sent_at)
+                so nothing the user typed is silently swallowed.
 
-            async def _run_turn(text: str, *, user_bubble_shown: bool = False) -> None:
+                Appends into ``loaded_messages`` and re-renders through
+                :func:`_render_live` (the same path a running turn's own
+                events use) rather than poking the DOM directly -- that
+                keeps this message subject to the same
+                `live_entry_mark`/`pending_index` bookkeeping as everything
+                else in the live region, so a subsequent tool-call update
+                during the *current* turn rebuilds its own rows without
+                disturbing (or losing) this one.
+                """
+                nonlocal queued_turn
+                sent_at = datetime.now().timestamp()
+                new_id = _append_local_message("user", text, sent_at)
+                if queued_turn is None:
+                    queued_turn = QueuedTurn(text, [new_id])
+                else:
+                    merged_text = f"{queued_turn.text}\n{text}".strip()
+                    queued_turn = QueuedTurn(merged_text, [*queued_turn.local_ids, new_id])
+                _render_live()
+                _scroll_to_bottom(transcript)
+
+            async def _run_turn(text: str, *, own_local_ids: list[int] | None = None) -> None:
                 """Stream one turn by folding SSE events into the buffer.
 
-                The turn's user message (unless ``user_bubble_shown``, i.e.
-                already queued) and one pending assistant :class:`Message` are
-                appended to ``loaded_messages`` up front, then every SSE event
-                mutates that pending message and re-renders through the same
-                :func:`render_transcript_events` path. High-frequency deltas
-                (reasoning/reply token streams) update the live-update handles
-                in place; rare structural events (tool started/completed,
-                first reasoning/reply delta, a real message id) rebuild the
-                whole timeline from the buffer -- cheap at a few per turn. The
-                gateway's completed transcript from ``run.completed`` is
-                preferred when available because tool results are not present
-                in tool SSE events and the daemon is the source of truth.
+                Turn ownership is an *id set* (`turn_local_ids`), not a list
+                position: either a fresh user message is appended now, or
+                (for a turn started from `queued_turn`) `own_local_ids`
+                already names messages `_queue_message` appended earlier.
+                Either way, every id this turn owns -- including the pending
+                assistant message, whose id can change mid-stream via
+                `message.started` -- stays tracked in `turn_local_ids`, so
+                `run.completed`'s reconciliation can swap out exactly this
+                turn's own messages by identity, unaffected by whatever
+                `_load_earlier` or a queued follow-up does to the rest of
+                ``loaded_messages`` around it.
+
+                High-frequency deltas (reasoning/reply token streams) patch
+                the live-update handles in place; structural events (tool
+                started/completed, a real message id, a queued message)
+                rebuild only the live region via :func:`_render_live` --
+                never the historical prefix, which only changes at this
+                turn's start and its ``run.completed`` reconciliation (see
+                :func:`_render_history`). The gateway's completed transcript
+                from ``run.completed`` is preferred when available because
+                tool results are not present in tool SSE events and the
+                daemon is the source of truth.
                 """
                 nonlocal session, current_run_id, active_message_id, tool_status
+                nonlocal pending_index
                 current_run_id = None
-                _update_stop_visibility()
+                _sync_streaming_controls()
                 _update_running_indicator(True)
                 sent_at = datetime.now().timestamp()
-                turn_start = len(loaded_messages)
+                if own_local_ids:
+                    turn_local_ids: set[int] = set(own_local_ids)
+                else:
+                    turn_local_ids = {_append_local_message("user", text, sent_at)}
                 # A plain non-None list (Message.tool_calls is `list | None`);
                 # `pending.tool_calls` is assigned this same object so the
                 # buffer render sees every append.
@@ -1034,14 +1196,19 @@ def register_pages(plugin: Plugin) -> None:
                     tool_calls=tool_calls,
                     timestamp=sent_at,
                 )
+                turn_local_ids.add(pending.id)
+                loaded_messages.append(pending)
+                pending_index = len(loaded_messages) - 1
                 active_message_id = pending.id
                 tool_status = {}
                 handles: dict[int, LiveEntry] = {}
                 try:
-                    if not user_bubble_shown:
-                        _append_local_message("user", text, sent_at)
-                    loaded_messages.append(pending)
-                    handles = _render_transcript()
+                    # Show this turn's own new user bubble (or drop the
+                    # "Queued" badge, if `own_local_ids` names an
+                    # already-queued message) as history, then start the
+                    # live region for `pending`.
+                    _render_history()
+                    handles = _render_live()
                     _scroll_to_bottom(transcript)
                     try:
                         async for event in client.stream_turn(
@@ -1057,9 +1224,11 @@ def register_pages(plugin: Plugin) -> None:
                                 message = event.data.get("message")
                                 mid = message.get("id") if isinstance(message, dict) else None
                                 if isinstance(mid, int) and mid != pending.id:
+                                    turn_local_ids.discard(pending.id)
                                     pending.id = mid
+                                    turn_local_ids.add(pending.id)
                                     active_message_id = pending.id
-                                    handles = _render_transcript()
+                                    handles = _render_live()
                             elif event.event == "tool.progress":
                                 name = event.data.get("tool_name", "tool")
                                 delta = str(event.data.get("delta", ""))
@@ -1070,19 +1239,24 @@ def register_pages(plugin: Plugin) -> None:
                                         pending.reasoning = (pending.reasoning or "") + delta
                                     handle = handles.get(pending.id)
                                     if handle is None or handle.reasoning_md is None:
-                                        handles = _render_transcript()
+                                        handles = _render_live()
                                         handle = handles.get(pending.id)
                                     if handle is not None and handle.reasoning_md is not None:
                                         _set_content_if_attached(
                                             handle.reasoning_md, pending.reasoning or ""
                                         )
                                 else:
+                                    call_id = event.data.get("tool_call_id") or (
+                                        _oldest_running_call_id(tool_calls, tool_status, name)
+                                    )
                                     handle = handles.get(pending.id)
-                                    if handle is not None:
-                                        for row in handle.tool_rows.values():
-                                            if row.spinner is not None:
-                                                row.label.set_text(oneline(delta, limit=60))
-                                                break
+                                    row = (
+                                        handle.tool_rows.get(call_id)
+                                        if handle and call_id
+                                        else None
+                                    )
+                                    if row is not None:
+                                        row.label.set_text(oneline(delta, limit=60))
                                     _scroll_to_bottom(transcript)
                             elif event.event == "tool.started":
                                 args = event.data.get("args") or event.data.get("preview")
@@ -1100,17 +1274,17 @@ def register_pages(plugin: Plugin) -> None:
                                     }
                                 )
                                 tool_status[call_id] = "running"
-                                handles = _render_transcript()
+                                handles = _render_live()
                                 _scroll_to_bottom(transcript)
                             elif event.event in {"tool.completed", "tool.failed"}:
-                                call_id = event.data.get("tool_call_id")
-                                if not call_id and tool_calls:
-                                    call_id = tool_calls[-1].get("id")
+                                call_id = event.data.get("tool_call_id") or _oldest_running_call_id(
+                                    tool_calls, tool_status, event.data.get("tool_name")
+                                )
                                 if call_id:
                                     tool_status[call_id] = (
                                         "failed" if event.event == "tool.failed" else "done"
                                     )
-                                    handles = _render_transcript()
+                                    handles = _render_live()
                                 _scroll_to_bottom(transcript)
                             elif event.event == "assistant.delta":
                                 pending.content = (pending.content or "") + event.data.get(
@@ -1118,7 +1292,7 @@ def register_pages(plugin: Plugin) -> None:
                                 )
                                 handle = handles.get(pending.id)
                                 if handle is None or handle.reply_md is None:
-                                    handles = _render_transcript()
+                                    handles = _render_live()
                                     handle = handles.get(pending.id)
                                 if handle is not None and handle.reply_md is not None:
                                     _set_content_if_attached(handle.reply_md, pending.content or "")
@@ -1127,7 +1301,7 @@ def register_pages(plugin: Plugin) -> None:
                                 pending.content = event.data.get("content", pending.content or "")
                                 handle = handles.get(pending.id)
                                 if handle is None or handle.reply_md is None:
-                                    handles = _render_transcript()
+                                    handles = _render_live()
                                     handle = handles.get(pending.id)
                                 if handle is not None and handle.reply_md is not None:
                                     _set_content_if_attached(handle.reply_md, pending.content or "")
@@ -1145,20 +1319,31 @@ def register_pages(plugin: Plugin) -> None:
                                         finalized = True
                                 messages = event.data.get("messages")
                                 if isinstance(messages, list) and messages:
-                                    del loaded_messages[turn_start:]
-                                    if not user_bubble_shown:
-                                        _append_local_message("user", text, sent_at)
-                                    loaded_messages.extend(
+                                    # Replace exactly this turn's own messages,
+                                    # by id -- not a list-index range -- so a
+                                    # concurrent `_load_earlier` prepend or a
+                                    # queued follow-up appended after this
+                                    # turn can never shift what gets removed.
+                                    positions = [
+                                        i
+                                        for i, m in enumerate(loaded_messages)
+                                        if m.id in turn_local_ids
+                                    ]
+                                    insert_at = positions[0] if positions else len(loaded_messages)
+                                    loaded_messages[:] = [
+                                        m for m in loaded_messages if m.id not in turn_local_ids
+                                    ]
+                                    loaded_messages[insert_at:insert_at] = [
                                         Message.from_json(message)
                                         for message in messages
                                         if isinstance(message, dict)
-                                    )
+                                    ]
                                     active_message_id = None
                                     tool_status = {}
-                                    _render_transcript()
+                                    _render_history()
                                     _scroll_to_bottom(transcript)
                                 elif finalized:
-                                    handles = _render_transcript()
+                                    handles = _render_live()
                                     _scroll_to_bottom(transcript)
                     except HermesError as exc:
                         ui.notify(f"Message failed: {exc}", type="negative")
@@ -1166,17 +1351,11 @@ def register_pages(plugin: Plugin) -> None:
                     current_run_id = None
                     active_message_id = None
                     tool_status = {}
-                    _update_stop_visibility()
+                    _sync_streaming_controls()
                     message_input.run_method("focus")
 
-                # Nothing extra to append on a non-reconciled turn: the
-                # locally-streamed user + assistant messages were already put
-                # in `loaded_messages` at turn start (and are what the timeline
-                # is currently showing), so a later transcript rebuild ("Load
-                # earlier") keeps them.
-
             async def send() -> None:
-                nonlocal session, streaming, stream_task, queued_text
+                nonlocal session, streaming, stream_task, queued_turn
                 text = (message_input.value or "").strip()
                 if not text and not pending_attachments:
                     return
@@ -1195,14 +1374,13 @@ def register_pages(plugin: Plugin) -> None:
                 streaming = True
                 stream_task = asyncio.current_task()
                 try:
-                    first = True
+                    own_ids: list[int] | None = None
                     while True:
-                        await _run_turn(text, user_bubble_shown=not first)
-                        if not queued_text:
+                        await _run_turn(text, own_local_ids=own_ids)
+                        if queued_turn is None:
                             break
-                        text = queued_text
-                        queued_text = None
-                        first = False
+                        text, own_ids = queued_turn.text, queued_turn.local_ids
+                        queued_turn = None
                 finally:
                     streaming = False
                     stream_task = None
@@ -1216,10 +1394,10 @@ def register_pages(plugin: Plugin) -> None:
                     _update_running_indicator(
                         is_running(session), session.last_activity_description
                     )
-                    _update_stop_visibility()
+                    _sync_streaming_controls()
 
             async def _do_stop() -> None:
-                nonlocal queued_text, stream_task, session
+                nonlocal queued_turn, stream_task, session
                 if streaming:
                     run_id = current_run_id
                     if run_id:
@@ -1228,9 +1406,9 @@ def register_pages(plugin: Plugin) -> None:
                         except HermesError as exc:
                             ui.notify(f"Stop request failed: {exc}", type="warning")
                     # Return anything queued to the box so it is never swallowed.
-                    if queued_text:
-                        message_input.set_value(queued_text)
-                        queued_text = None
+                    if queued_turn is not None:
+                        message_input.set_value(queued_turn.text)
+                        queued_turn = None
                     # Abort the local stream. The gateway also treats an SSE client
                     # disconnect as an interrupt, so this covers the brief window
                     # before run.started delivered a run_id.
@@ -1353,10 +1531,7 @@ def register_pages(plugin: Plugin) -> None:
                         .mark("chat-stop")
                     )
 
-                    def _update_stop_visibility() -> None:
-                        stop_button.set_visibility(streaming or is_running(session))
-
-                    _update_stop_visibility()
+                    _sync_streaming_controls()
                     ui.button(icon="send", on_click=lambda: _run_in_client(send)).props(
                         "round dense"
                     ).mark("chat-send")
@@ -1371,7 +1546,7 @@ def register_pages(plugin: Plugin) -> None:
                     return
                 session = fresh
                 _update_running_indicator(is_running(session), session.last_activity_description)
-                _update_stop_visibility()
+                _sync_streaming_controls()
                 stats_label.set_text(_stats_text())
 
             ui.timer(5.0, lambda: _run_in_client(_refresh_session_state))
