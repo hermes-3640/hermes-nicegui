@@ -12,9 +12,13 @@ from nicegui.elements.upload_files import SmallFileUpload
 from nicegui.testing import User
 
 from hermes_nicegui import web
+from hermes_nicegui.gateway import Message
 from hermes_nicegui.plugin import PluginContext
 from hermes_nicegui.plugins.sessions import SessionsPlugin
-from hermes_nicegui.plugins.sessions.ui import _delete_if_attached, _live_tool_entry
+from hermes_nicegui.plugins.sessions.ui import (
+    _delete_if_attached,
+    render_transcript_events,
+)
 
 
 async def test_detail_page_loads_directly(user: User, context: PluginContext) -> None:
@@ -49,9 +53,7 @@ async def test_send_message_streams_reply(user: User, context: PluginContext) ->
     await user.should_see("Hello world")
 
 
-async def test_live_reasoning_shown_in_timeline(
-    user: User, context: PluginContext
-) -> None:
+async def test_live_reasoning_shown_in_timeline(user: User, context: PluginContext) -> None:
     web.build(context, [SessionsPlugin(context)])
     await user.open("/sessions/sess-1")
     await user.should_see("How do I access your API?")
@@ -155,13 +157,131 @@ async def test_live_tool_cleanup_ignores_detached_spinner(
     user.find(marker="chat-input").type("detach during tool cleanup")
     user.find(marker="chat-send").click()
     await user.should_see(marker="live-tool", retries=20)
+    await user.should_see(marker="live-tool-done", retries=20)
 
+    # A live tool row built through the single render path, then detached
+    # before cleanup, must not crash `_delete_if_attached` -- the same
+    # detach-safety that matters during a concurrent page teardown.
+    messages = [
+        Message(
+            id=50,
+            session_id="sess-1",
+            role="assistant",
+            content="",
+            tool_calls=[
+                {
+                    "id": "call_detach",
+                    "type": "function",
+                    "function": {"name": "terminal", "arguments": '{"command": "ls"}'},
+                }
+            ],
+        )
+    ]
     timeline = next(iter(user.find(kind=ui.timeline).elements))
     with timeline:
-        live_tool = _live_tool_entry("terminal", '{"command": "ls"}', None)
-    live_tool.row.delete()
-
+        handles = render_transcript_events(
+            messages, active_id=50, tool_status={"call_detach": "running"}
+        )
+    live_tool = handles[50].tool_rows["call_detach"]
+    assert live_tool.spinner is not None
+    slot = live_tool.spinner.parent_slot
+    assert slot is not None
+    slot.parent.delete()  # detach the whole row
     _delete_if_attached(live_tool.spinner)
+
+
+async def test_no_thinking_spinner_during_turn(user: User, context: PluginContext, hermes) -> None:
+    """The per-turn "Thinking…" status row is gone: while a turn streams
+    (reasoning delta in flight), that exact label never appears on the page."""
+    hermes.stream_delay = 0.2
+    web.build(context, [SessionsPlugin(context)])
+    await user.open("/sessions/sess-1")
+    await user.should_see("How do I access your API?")
+
+    user.find(marker="chat-input").type("no spinner")
+    user.find(marker="chat-send").click()
+
+    # Wait until we are unambiguously mid-turn (reasoning streamed), then
+    # check no "Thinking…" label exists anywhere on the page.
+    await user.should_see(marker="live-reasoning", retries=20)
+    await user.should_not_see("Thinking…", retries=20)
+    await user.should_see("thinking…")
+    await user.should_see("Hello world", retries=30)
+
+
+async def test_out_of_order_arrival_renders_canonical_order(
+    user: User, context: PluginContext, hermes
+) -> None:
+    """A deliberately scrambled SSE order (reply delta before tool.started)
+    still renders canonically -- user -> tool -> reply -- because events fold
+    into the message buffer and rendering follows buffer order, not arrival
+    order."""
+    hermes.stream_events = [
+        ("run.started", {"run_id": "run_scrambled"}),
+        ("message.started", {"message": {"id": 20, "role": "assistant"}}),
+        ("assistant.delta", {"message_id": 20, "delta": "first delta"}),
+        (
+            "tool.started",
+            {
+                "message_id": 20,
+                "tool_name": "terminal",
+                "args": '{"command": "ls"}',
+            },
+        ),
+        ("assistant.delta", {"message_id": 20, "delta": " and second delta"}),
+        ("tool.completed", {"message_id": 20, "tool_name": "terminal"}),
+        (
+            "assistant.completed",
+            {"message_id": 20, "content": "first delta and second delta"},
+        ),
+        ("run.completed", {"completed": True, "usage": {}}),
+        ("done", {}),
+    ]
+    web.build(context, [SessionsPlugin(context)])
+    await user.open("/sessions/sess-1")
+    await user.should_see("How do I access your API?")
+
+    user.find(marker="chat-input").type("scrambled order")
+    user.find(marker="chat-send").click()
+
+    await user.should_see(marker="live-tool", retries=20)
+    await user.should_see(marker="live-reply", retries=20)
+    timeline = next(iter(user.find(kind=ui.timeline).elements))
+    marked = [
+        child._props.get("mark") or " ".join(child._markers)
+        for child in timeline.default_slot.children
+    ]
+    # Canonical, not arrival order: the tool row (which arrived after the
+    # reply bubble started) still precedes the reply.
+    assert marked.index("live-tool") < marked.index("live-reply")
+    await user.should_see("terminal:")
+    await user.should_see("first delta and second delta")
+
+
+async def test_thinking_tool_progress_is_reasoning_not_tool_row(
+    user: User, context: PluginContext, hermes
+) -> None:
+    """A `tool.progress` named `_thinking` folds into the reasoning body and
+    never produces a `live-tool` row."""
+    hermes.stream_events = [
+        ("run.started", {"run_id": "run_thinking"}),
+        ("message.started", {"message": {"id": 20, "role": "assistant"}}),
+        ("tool.progress", {"message_id": 20, "tool_name": "_thinking", "delta": "reasoning text"}),
+        ("assistant.delta", {"message_id": 20, "delta": "reply"}),
+        ("assistant.completed", {"message_id": 20, "content": "reply"}),
+        ("run.completed", {"completed": True, "usage": {}}),
+        ("done", {}),
+    ]
+    web.build(context, [SessionsPlugin(context)])
+    await user.open("/sessions/sess-1")
+    await user.should_see("How do I access your API?")
+
+    user.find(marker="chat-input").type("thinking")
+    user.find(marker="chat-send").click()
+
+    await user.should_see(marker="live-reasoning", retries=20)
+    await user.should_see("reasoning text")
+    await user.should_not_see(marker="live-tool", retries=20)
 
 
 async def test_run_completed_reconciles_authoritative_transcript(
@@ -319,9 +439,7 @@ async def test_message_sent_mid_turn_is_queued_then_delivered(
 
     # Once the first turn completes, the queued turn is delivered in order.
     for _ in range(50):
-        recorded = [
-            m["content"] for m in hermes.messages["sess-1"] if m["role"] == "user"
-        ]
+        recorded = [m["content"] for m in hermes.messages["sess-1"] if m["role"] == "user"]
         if recorded[-2:] == ["first turn", "second turn"]:
             break
         await asyncio.sleep(0.1)

@@ -1,11 +1,18 @@
 """Sessions plugin pages: session list, a per-session event timeline, and chat.
 
-The transcript reads as a compact chat timeline: live and historical turns use
-the same entry types for user input, reasoning, tool calls/results, and Hermes'
-replies. Live reasoning and tool events are shown as they arrive, then the
-authoritative per-turn transcript from ``run.completed`` replaces the
-synthetic live entries so a completed turn is identical to a reload.
-Timestamps are available on hover (tooltip) rather than printed on every row.
+The transcript reads as a compact chat timeline with a *single* data-driven
+render path: :func:`render_transcript_events` builds every entry -- user
+bubble, reasoning ``_step``, fused tool call+result, orphan tool result, and
+Hermes' reply -- from the ``list[Message]`` buffer, in buffer order. Historical
+pages render the buffer as-is; a live SSE turn instead folds its events into
+the same buffer (one pending assistant ``Message``) and re-renders through the
+same function, which returns live-update handles so streamed reasoning/reply
+deltas and per-tool status glyphs update in place. Because rendering is purely
+data-driven, any SSE arrival order renders canonically
+(user -> reasoning -> tool calls -> reply), and the authoritative per-turn
+transcript from ``run.completed`` still replaces the local buffer so a
+completed turn is identical to a reload. Timestamps are available on hover
+(tooltip) rather than printed on every row.
 
 Session *reads* (list, detail, rename, delete) go straight at the daemon's
 own SQLite ``state.db`` for whichever profile is active for this browser tab
@@ -24,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
 from pathlib import Path
@@ -84,12 +92,21 @@ def _unread_state() -> dict[str, float]:
 # -- transcript rendering ---------------------------------------------------
 #
 # Historical messages and live SSE events converge on the same timeline entry
-# types. Every event -- said or done -- gets exactly one ``ui.timeline_entry``.
-# The icon+color say what kind of event it is; no separate title/subtitle text
-# duplicates that. Timestamps sit behind a hover tooltip on that same icon
-# (see ``_icon_tooltip``) rather than a separate element or a permanently
-# visible subtitle. A completed live turn is rebuilt from its authoritative
-# ``run.completed`` transcript by the detail page closure below.
+# types, produced by one data-driven render function
+# (:func:`render_transcript_events`). Every event -- said or done -- gets
+# exactly one ``ui.timeline_entry``. The icon+color say what kind of event it
+# is; no separate title/subtitle text duplicates that. Timestamps sit behind a
+# hover tooltip on that same icon (see ``_icon_tooltip``) rather than a
+# separate element or a permanently visible subtitle.
+#
+# Live streaming keeps a single pending assistant ``Message`` in the buffer and
+# folds SSE events into it (see the detail page's ``_run_turn``); rendering is
+# re-invoked through the same function. The message whose id is passed as
+# ``active_id`` renders eagerly and open, and the returned handle gives the
+# stream code in-place references (``reasoning_md``/``reply_md`` markdown
+# bodies, per-tool ``LiveToolRow`` controls) so per-token deltas update without
+# rebuilding the whole timeline. ``tool_status`` renders a small spinner or a
+# check/error glyph next to a tool row's label while a turn is live.
 
 # Quasar's own rule for an icon entry's subtitle is `padding-top: 8px`
 # (`.q-timeline__entry--icon .q-timeline__subtitle`); the icon glyph itself
@@ -158,6 +175,36 @@ def _icon_tooltip(entry: ui.timeline_entry, timestamp: float | None) -> None:
     )
 
 
+@dataclass
+class LiveToolRow:
+    """Mutable controls for one tool row whose SSE lifecycle is still active.
+
+    The row's ``label`` is the ``name: preview`` text; ``spinner`` is the
+    per-tool progress glyph while the call runs; ``done_mark`` replaces it
+    with a check/error icon once the call completes or fails. All three are
+    created by :func:`render_transcript_events` and updated in place by the
+    streaming code -- never re-created per event.
+    """
+
+    label: ui.label
+    spinner: ui.spinner | None
+    done_mark: ui.icon | None
+
+
+@dataclass
+class LiveEntry:
+    """In-place update handles for the one message being streamed right now.
+
+    Returned by :func:`render_transcript_events` for the message whose id
+    equals ``active_id``; the message renders eagerly and open so these
+    references exist. ``tool_rows`` is keyed by ``tool_call_id``.
+    """
+
+    reasoning_md: ui.markdown | None
+    reply_md: ui.markdown | None
+    tool_rows: dict[str, LiveToolRow]
+
+
 def _collapsible_entry(
     icon: str,
     color: str,
@@ -166,7 +213,9 @@ def _collapsible_entry(
     render_body: Callable[[], None] | None,
     *,
     default_open: bool = False,
-) -> None:
+    mark: str | None = None,
+    status: str | None = None,
+) -> LiveToolRow | None:
     """A timeline entry whose header *is* the summary, via Quasar's
     ``subtitle`` slot.
 
@@ -185,10 +234,31 @@ def _collapsible_entry(
     ``default_open`` skips that laziness and builds immediately -- used for
     the one entry (the transcript's last message) that should already be
     visible without a click.
+
+    ``mark`` (a test-visible marker on the entry) and ``status`` are only
+    used by the live render path. ``status`` ("running"/"done"/"failed")
+    swaps the summary for a row with the matching status glyph -- a small
+    spinner while running, a check/error icon once finished -- beside the
+    label, and returns the :class:`LiveToolRow` of in-place controls so the
+    stream can update them. ``status`` is None for purely historical rows.
     """
     entry = ui.timeline_entry(icon=icon, color=color)
+    if mark is not None:
+        entry.mark(mark)
     _icon_tooltip(entry, timestamp)
     with entry.add_slot("subtitle"):
+        if status is not None:
+            with ui.row().classes("items-center gap-2 w-full"):
+                if status == "running":
+                    spinner = ui.spinner(size="sm")
+                    done_mark = None
+                else:
+                    spinner = None
+                    done_mark = ui.icon(
+                        "error" if status == "failed" else "check_circle", size="xs"
+                    ).mark("live-tool-failed" if status == "failed" else "live-tool-done")
+                label_el = ui.label(summary).classes("text-xs")
+            return LiveToolRow(label=label_el, spinner=spinner, done_mark=done_mark)
         if render_body is None:
             # Matches Quasar's own `.q-item` header padding on the
             # `ui.expansion` branch below (`padding: 2px 16px`, confirmed
@@ -200,15 +270,14 @@ def _collapsible_entry(
             ui.label(summary).classes("text-xs w-full py-0.5 px-4")
         else:
             expansion = (
-                ui.expansion(summary, value=default_open)
-                .props("dense")
-                .classes("text-xs w-full")
+                ui.expansion(summary, value=default_open).props("dense").classes("text-xs w-full")
             )
             if default_open:
                 with expansion:
                     render_body()
             else:
                 _lazy_expansion_body(expansion, render_body)
+    return None
 
 
 def _lazy_expansion_body(expansion: ui.expansion, render_body: Callable[[], None]) -> None:
@@ -249,44 +318,6 @@ def _scroll_to_bottom(anchor: ui.element) -> None:
         )
 
 
-def _chat_bubble_shell(icon: str, color: str, sender: str, timestamp: float | None) -> ui.markdown:
-    """Build a chat bubble's entry+card shell and return its markdown body.
-
-    Split out from :func:`_chat_bubble` so a live-streamed reply can build
-    the same shell once and keep updating the markdown's content as deltas
-    arrive, instead of re-rendering a whole new bubble per token. Always
-    rendered open, unlike :func:`_chat_bubble` -- this is only ever used for
-    the reply actively streaming in during *this browser session*; collapsing
-    something mid-stream would hide the very thing the spinner/status row is
-    telling you to watch. Once that reply is done and the page later rebuilds
-    the transcript from data (e.g. after "Load earlier"), it re-renders
-    through :func:`_chat_bubble` like any other historical message -- there's
-    nothing that marks it as special past this one render.
-    """
-    entry = ui.timeline_entry(icon=icon, color=color).mark("live-reply")
-    _icon_tooltip(entry, timestamp)
-    with entry.add_slot("subtitle"):
-        ui.label(sender).classes("text-xs font-bold w-full")
-    with entry, ui.card().props("flat bordered").classes("w-fit max-w-full q-mt-xs q-mb-md"):
-        return ui.markdown()
-
-
-def _timeline_entry_of(element: ui.element) -> ui.timeline_entry | None:
-    """Find the timeline entry containing a nested live element."""
-    current: ui.element | None = element
-    while current is not None:
-        try:
-            parent_slot = current.parent_slot
-            if parent_slot is not None and current not in parent_slot.children:
-                return None
-            if isinstance(current, ui.timeline_entry):
-                return current
-            current = parent_slot.parent if parent_slot is not None else None
-        except (AttributeError, ValueError):
-            return None
-    return None
-
-
 def _is_attached(element: ui.element) -> bool:
     """Return whether an element is still present in its parent slot chain."""
     current: ui.element | None = element
@@ -296,7 +327,10 @@ def _is_attached(element: ui.element) -> bool:
             if current not in parent_slot.children:
                 return False
             current = parent_slot.parent
-    except (AttributeError, ValueError):
+    except (AttributeError, ValueError, RuntimeError):
+        # A teardown/re-render may have already GC'd a parent slot (whose
+        # weakref reads as "deleted") or the element's own slot -- that is
+        # precisely the "detached" state this guard exists to detect.
         return False
     return True
 
@@ -319,49 +353,6 @@ def _set_content_if_attached(element: ui.markdown, content: str) -> None:
         pass
 
 
-def _live_body_entry(
-    icon: str, color: str, header: str, timestamp: float | None
-) -> ui.markdown:
-    """Build an open, incrementally updated timeline body for live reasoning."""
-    entry = ui.timeline_entry(icon=icon, color=color).mark("live-reasoning")
-    _icon_tooltip(entry, timestamp)
-    with entry.add_slot("subtitle"):
-        with ui.expansion(header, value=True).props("dense").classes("text-xs w-full"):
-            return ui.markdown()
-
-
-class _LiveToolEntry:
-    """Mutable controls for a tool row while its SSE lifecycle is active."""
-
-    def __init__(
-        self,
-        entry: ui.timeline_entry,
-        row: ui.row,
-        spinner: ui.spinner,
-        label: ui.label,
-    ) -> None:
-        self.entry = entry
-        self.row = row
-        self.spinner = spinner
-        self.label = label
-        self.done_mark: ui.icon | None = None
-
-
-def _live_tool_entry(
-    name: str, args_preview: str | None, timestamp: float | None
-) -> _LiveToolEntry:
-    """Build the compact live tool row that is finalized by tool SSE events."""
-    preview = oneline(args_preview, limit=60) if args_preview else ""
-    label_text = f"{name}: {preview}" if preview else name
-    entry = ui.timeline_entry(icon="construction", color="grey").mark("live-tool")
-    _icon_tooltip(entry, timestamp)
-    with entry.add_slot("subtitle"):
-        with ui.row().classes("items-center gap-2 text-xs w-full") as row:
-            spinner = ui.spinner(size="sm")
-            label = ui.label(label_text)
-    return _LiveToolEntry(entry, row, spinner, label)
-
-
 def _chat_bubble(
     icon: str,
     color: str,
@@ -370,7 +361,8 @@ def _chat_bubble(
     timestamp: float | None,
     *,
     default_open: bool = False,
-) -> None:
+    active: bool = False,
+) -> ui.markdown | None:
     """A visible chat message -- something the user or Hermes actually said.
 
     Collapsed by default, same as the mechanical event rows below (see
@@ -379,19 +371,38 @@ def _chat_bubble(
     eagerly is wasted work at that scale. Two exceptions stay open:
     ``default_open`` (used by :func:`render_transcript_events` for the
     transcript's last message, so re-opening a session doesn't start on a
-    wall of collapsed rows) and the reply actively streaming in right now,
-    which goes through :func:`_chat_bubble_shell` instead.
+    wall of collapsed rows) and the message actively streaming in right now
+    (``active``), which also renders its body eagerly and returns the
+    ``ui.markdown`` handle so streamed reply deltas can update it in place.
     """
     summary = f"{sender}: {oneline(content, limit=80)}" if content else sender
+    md_holder: list[ui.markdown] = []
 
     def _body() -> None:
         with ui.card().props("flat bordered").classes("w-fit max-w-full q-mt-xs q-mb-md"):
-            ui.markdown(content)
+            md_holder.append(ui.markdown(content))
 
-    _collapsible_entry(icon, color, summary, timestamp, _body, default_open=default_open)
+    _collapsible_entry(
+        icon,
+        color,
+        summary,
+        timestamp,
+        _body,
+        default_open=active or default_open,
+        mark="live-reply" if active else None,
+    )
+    return md_holder[0] if md_holder else None
 
 
-def _step(icon: str, color: str, text: str, timestamp: float | None, *, mono: bool = False) -> None:
+def _step(
+    icon: str,
+    color: str,
+    text: str,
+    timestamp: float | None,
+    *,
+    mono: bool = False,
+    active: bool = False,
+) -> ui.markdown | None:
     """One compact row for a mechanical event (not something said).
 
     Text that already fits on one line *is* the header, nothing to expand.
@@ -400,22 +411,38 @@ def _step(icon: str, color: str, text: str, timestamp: float | None, *, mono: bo
     tool result) as YAML in a code viewer -- see :func:`pretty_yaml`.
     """
     summary = oneline(text)
-    if summary == text.strip():
+    if not active and summary == text.strip():
         _collapsible_entry(icon, color, text, timestamp, None)
-        return
+        return None
+    md_holder: list[ui.markdown] = []
 
     def _body() -> None:
         if mono:
             ui.code(pretty_yaml(text), language="yaml").classes("w-full")
         else:
-            ui.markdown(text)
+            md_holder.append(ui.markdown(text))
 
-    _collapsible_entry(icon, color, summary, timestamp, _body)
+    _collapsible_entry(
+        icon,
+        color,
+        summary,
+        timestamp,
+        _body,
+        default_open=active,
+        mark="live-reasoning" if active else None,
+    )
+    return md_holder[0] if md_holder else None
 
 
 def _tool_round_trip(
-    name: str, args: str | None, result: Message | None, timestamp: float | None
-) -> None:
+    name: str,
+    args: str | None,
+    result: Message | None,
+    timestamp: float | None,
+    *,
+    status: str | None = None,
+    active: bool = False,
+) -> LiveToolRow | None:
     """One entry for a tool call *and* its own result, not two.
 
     A "Called X" row followed immediately by an "X result" row says the tool
@@ -424,6 +451,13 @@ def _tool_round_trip(
     the (often much longer) result -- both usually JSON on the wire -- sits
     behind the same toggle, re-rendered as YAML (see :func:`pretty_yaml`)
     so multi-line values inside it read as actual lines, not `\n` escapes.
+
+    ``status``/``active`` are only set by the live render path: a running or
+    just-finished tool renders the same entry with a status glyph beside its
+    label (via :func:`_collapsible_entry`) instead of the collapsible body --
+    the tool's result isn't in the stream, only in the reconciled
+    ``run.completed`` transcript -- and returns the :class:`LiveToolRow`
+    controls so the stream can finalize the glyph in place.
     """
     label = f"{name}: {oneline(args, limit=60)}" if args else name
 
@@ -436,21 +470,50 @@ def _tool_round_trip(
             ui.code(pretty_yaml(result.content), language="yaml").classes("w-full")
 
     has_body = bool(args) or bool(result and result.content)
-    _collapsible_entry("construction", "grey", label, timestamp, _body if has_body else None)
+    return _collapsible_entry(
+        "construction",
+        "grey",
+        label,
+        timestamp,
+        _body if has_body else None,
+        mark="live-tool" if active else None,
+        status=status,
+    )
 
 
-def render_transcript_events(messages: list[Message]) -> None:
+def render_transcript_events(
+    messages: list[Message],
+    *,
+    active_id: int | None = None,
+    tool_status: dict[str, str] | None = None,
+) -> dict[int, LiveEntry]:
     """Render the whole transcript as a true, chronological event timeline.
 
-    Every entry -- chat bubbles included -- collapses to a one-line summary
-    by default (see :func:`_chat_bubble`/:func:`_collapsible_entry`), except
-    the *last* message actually said (the tail of ``messages``, which is
-    always the session's most recent when this renders the initial page --
-    see ``get_messages_page``): that one opens automatically, so loading a
+    The single render path for both historical transcripts and a live SSE
+    turn: every entry is built here, from ``messages`` in buffer order. Every
+    entry -- chat bubbles included -- collapses to a one-line summary by
+    default (see :func:`_chat_bubble`/:func:`_collapsible_entry`), except the
+    *last* message actually said (the tail of ``messages``, which is always
+    the session's most recent when this renders the initial page -- see
+    ``get_messages_page``): that one opens automatically, so loading a
     session lands on what it last said instead of a wall of collapsed rows.
     A tool call and its own result (matched by ``tool_call_id``, not just
     assumed to be the next message) render as one fused entry -- see
     :func:`_tool_round_trip`.
+
+    ``active_id`` marks the message being streamed right now (the pending
+    assistant message). Only that message renders eagerly and open and is
+    given a live-update handle in the returned dict (keyed by message id), so
+    the stream code can update its reasoning/reply markdown and tool status
+    glyphs in place; every other message renders exactly as it would
+    historically. ``active_id=None`` renders a pure historical transcript and
+    returns an empty dict.
+
+    ``tool_status`` maps a ``tool_call_id`` to ``"running"``/``"done"``/
+    ``"failed"`` and makes that tool row render a small spinner or a
+    check/error icon beside its label (the same ``_tool_round_trip`` entry
+    type as a finished call -- just with a live status glyph). ``None`` means
+    no glyph anywhere (pure historical).
     """
     results_by_call_id = {
         m.tool_call_id: m for m in messages if m.role == "tool" and m.tool_call_id
@@ -464,8 +527,11 @@ def render_transcript_events(messages: list[Message]) -> None:
         ),
         None,
     )
+    statuses = tool_status or {}
+    handles: dict[int, LiveEntry] = {}
 
     for msg in messages:
+        is_active = active_id is not None and msg.id == active_id
         if msg.role == "user":
             _chat_bubble(
                 "person",
@@ -477,27 +543,50 @@ def render_transcript_events(messages: list[Message]) -> None:
             )
 
         elif msg.role == "assistant":
+            reasoning_md = None
             if msg.reasoning:
-                _step("psychology", "amber", msg.reasoning, msg.timestamp)
+                reasoning_md = _step(
+                    "psychology", "amber", msg.reasoning, msg.timestamp, active=is_active
+                )
+            tool_rows: dict[str, LiveToolRow] = {}
             for call in msg.tool_calls or []:
                 fn = call.get("function", {})
                 call_id = call.get("id")
                 result = results_by_call_id.get(call_id) if call_id else None
-                _tool_round_trip(fn.get("name", "tool"), fn.get("arguments"), result, msg.timestamp)
+                row = _tool_round_trip(
+                    fn.get("name", "tool"),
+                    fn.get("arguments"),
+                    result,
+                    msg.timestamp,
+                    status=statuses.get(call_id) if call_id else None,
+                    active=is_active,
+                )
+                if is_active and call_id and row is not None:
+                    tool_rows[call_id] = row
+            reply_md = None
             if msg.content:
-                _chat_bubble(
+                reply_md = _chat_bubble(
                     "smart_toy",
                     "secondary",
                     "Hermes",
                     msg.content,
                     msg.timestamp,
                     default_open=msg.id == last_bubble_id,
+                    active=is_active,
+                )
+            if is_active:
+                handles[msg.id] = LiveEntry(
+                    reasoning_md=reasoning_md,
+                    reply_md=reply_md,
+                    tool_rows=tool_rows,
                 )
 
         elif msg.id not in consumed_result_ids:
             # An orphaned tool result: its call fell outside this page of
             # messages, so there was nothing to fuse it with above.
             _step("output", "teal", msg.content or "(empty)", msg.timestamp, mono=True)
+
+    return handles
 
 
 # -- pages --------------------------------------------------------------
@@ -603,20 +692,16 @@ def register_pages(plugin: Plugin) -> None:
                     .props("outlined dense options-dense")
                     .on("update:model-value", lambda: _search_or_source_changed())
                 )
-                unread_only = ui.switch("Unread").on(
-                    "update:model-value", lambda: render_rows()
-                )
-                ui.button(
-                    icon="done_all", on_click=_mark_all_read
-                ).props("flat round dense").mark("mark-all-read-button").tooltip(
-                    "Mark all sessions as read"
-                )
+                unread_only = ui.switch("Unread").on("update:model-value", lambda: render_rows())
+                ui.button(icon="done_all", on_click=_mark_all_read).props("flat round dense").mark(
+                    "mark-all-read-button"
+                ).tooltip("Mark all sessions as read")
                 ui.button(
                     icon="refresh", on_click=lambda: background_tasks.create(_refresh())
                 ).props("flat round dense").mark("refresh-button").tooltip("Refresh")
-                ui.button(
-                    "New session", icon="add", on_click=_new_session
-                ).props("unelevated").mark("new-session-button")
+                ui.button("New session", icon="add", on_click=_new_session).props(
+                    "unelevated"
+                ).mark("new-session-button")
 
             list_container = ui.list().props("separator").classes("w-full")
 
@@ -739,9 +824,7 @@ def register_pages(plugin: Plugin) -> None:
                     ui.badge(session.source or "unknown", color="grey")
                     ui.badge(session.model or "no model", color="primary")
                     with (
-                        ui.row()
-                        .classes("items-center gap-1")
-                        .mark("session-running")
+                        ui.row().classes("items-center gap-1").mark("session-running")
                     ) as running_indicator:
                         ui.spinner(size="1em", color="positive")
                         ui.label("Running").classes("text-xs font-bold text-positive")
@@ -787,6 +870,16 @@ def register_pages(plugin: Plugin) -> None:
             stream_task: asyncio.Task | None = None
             current_run_id: str | None = None
             queued_text: str | None = None
+            # Live-streaming render state, consumed by `_render_transcript`:
+            # the id of the one assistant message being streamed right now
+            # (rendered eagerly/open with live-update handles) and the
+            # per-tool_call_id status map that turns its tool rows' spinner
+            # into a done/failed glyph. Both are owned by `_run_turn` and
+            # reset to None/{} the moment a turn ends, so every other render
+            # (initial page, "Load earlier", a reconciled turn) is purely
+            # historical.
+            active_message_id: int | None = None
+            tool_status: dict[str, str] = {}
             # Files picked in the composer, awaiting send: {"name", "path",
             # "size"}. Cleared once they're attached to a message (sent or
             # queued) or individually removed.
@@ -803,17 +896,28 @@ def register_pages(plugin: Plugin) -> None:
                         on_click=lambda: _run_in_client(_load_earlier),
                     ).props("flat dense").mark("load-earlier-button")
 
-            def _render_transcript() -> None:
+            def _render_transcript() -> dict[int, LiveEntry]:
+                """Rebuild the whole timeline from ``loaded_messages``.
+
+                The single render path: historical and live turns both land
+                here. Returns the live-update handles for the message being
+                streamed (see :func:`render_transcript_events`), empty for a
+                purely historical render.
+                """
                 nonlocal timeline
                 transcript.clear()
                 if not loaded_messages:
                     with transcript:
                         ui.label("No messages yet.")
                     timeline = None
-                    return
+                    return {}
                 with transcript, ui.timeline(layout="dense").classes("w-full") as tl:
                     timeline = tl
-                    render_transcript_events(loaded_messages)
+                    return render_transcript_events(
+                        loaded_messages,
+                        active_id=active_message_id,
+                        tool_status=tool_status or None,
+                    )
 
             _render_earlier_button()
             _render_transcript()
@@ -886,162 +990,159 @@ def register_pages(plugin: Plugin) -> None:
                 """Mid-turn send: show the message immediately, marked queued,
                 so nothing the user typed is silently swallowed."""
                 nonlocal queued_text
-                queued_text = (
-                    f"{queued_text}\n{text}".strip() if queued_text else text
-                )
+                queued_text = f"{queued_text}\n{text}".strip() if queued_text else text
                 sent_at = datetime.now().timestamp()
                 with _timeline():
                     _chat_bubble("person", "primary", "You", text, sent_at)
-                    with ui.row().classes(
-                        "items-center gap-2 text-xs opacity-60 q-mb-sm"
-                    ):
+                    with ui.row().classes("items-center gap-2 text-xs opacity-60 q-mb-sm"):
                         ui.icon("schedule")
                         ui.label("Queued — will send after this turn completes")
                 _scroll_to_bottom(transcript)
                 _append_local_message("user", text, sent_at)
 
-            async def _run_turn(
-                text: str, *, user_bubble_shown: bool = False
-            ) -> None:
-                """Stream one turn, using the same entries as the transcript.
+            async def _run_turn(text: str, *, user_bubble_shown: bool = False) -> None:
+                """Stream one turn by folding SSE events into the buffer.
 
-                ``user_bubble_shown`` is True for queued turns whose bubble was
-                already rendered by :func:`_queue_message`; only the reply half
-                is added then. The gateway's completed transcript is preferred
-                when available because tool results are not present in tool SSE
-                events and the daemon is the source of truth.
+                The turn's user message (unless ``user_bubble_shown``, i.e.
+                already queued) and one pending assistant :class:`Message` are
+                appended to ``loaded_messages`` up front, then every SSE event
+                mutates that pending message and re-renders through the same
+                :func:`render_transcript_events` path. High-frequency deltas
+                (reasoning/reply token streams) update the live-update handles
+                in place; rare structural events (tool started/completed,
+                first reasoning/reply delta, a real message id) rebuild the
+                whole timeline from the buffer -- cheap at a few per turn. The
+                gateway's completed transcript from ``run.completed`` is
+                preferred when available because tool results are not present
+                in tool SSE events and the daemon is the source of truth.
                 """
-                nonlocal session, current_run_id
+                nonlocal session, current_run_id, active_message_id, tool_status
                 current_run_id = None
                 _update_stop_visibility()
-                _update_running_indicator(True, "Thinking…")
+                _update_running_indicator(True)
                 sent_at = datetime.now().timestamp()
                 turn_start = len(loaded_messages)
-                reasoning_text = ""
-                reasoning_md: ui.markdown | None = None
-                active_tool: _LiveToolEntry | None = None
-                reply_md: ui.markdown | None = None
-                reply_content = ""
-                reconciled = False
+                # A plain non-None list (Message.tool_calls is `list | None`);
+                # `pending.tool_calls` is assigned this same object so the
+                # buffer render sees every append.
+                tool_calls: list[dict] = []
+                pending = Message(
+                    id=_next_local_id(),
+                    session_id=session_id,
+                    role="assistant",
+                    content="",
+                    tool_calls=tool_calls,
+                    timestamp=sent_at,
+                )
+                active_message_id = pending.id
+                tool_status = {}
+                handles: dict[int, LiveEntry] = {}
                 try:
-                    with _timeline():
-                        if not user_bubble_shown:
-                            _chat_bubble("person", "primary", "You", text, sent_at)
-                        with ui.row().classes(
-                            "items-center gap-2 text-xs opacity-60 q-mb-sm"
-                        ) as status_row:
-                            ui.spinner(size="1em")
-                            ui.label("Thinking…")
+                    if not user_bubble_shown:
+                        _append_local_message("user", text, sent_at)
+                    loaded_messages.append(pending)
+                    handles = _render_transcript()
                     _scroll_to_bottom(transcript)
                     try:
                         async for event in client.stream_turn(
                             session_id, text, model=session.model
                         ):
-                            timestamp = event.data.get("ts")
                             if event.event == "run.started":
                                 current_run_id = event.data.get("run_id") or current_run_id
+                            elif event.event == "message.started":
+                                # Adopt the daemon's id for the pending message
+                                # (only when it's a real id, not a placeholder
+                                # string) so the handle dict and any later
+                                # reconcile stay keyed consistently.
+                                message = event.data.get("message")
+                                mid = message.get("id") if isinstance(message, dict) else None
+                                if isinstance(mid, int) and mid != pending.id:
+                                    pending.id = mid
+                                    active_message_id = pending.id
+                                    handles = _render_transcript()
                             elif event.event == "tool.progress":
                                 name = event.data.get("tool_name", "tool")
                                 delta = str(event.data.get("delta", ""))
                                 if name == "_thinking":
+                                    # The thinking stream IS the reasoning body
+                                    # -- never a tool row.
                                     if delta:
-                                        reasoning_text += delta
-                                    if reasoning_md is None:
-                                        with _timeline():
-                                            reasoning_md = _live_body_entry(
-                                                "psychology",
-                                                "amber",
-                                                oneline(reasoning_text)
-                                                if reasoning_text
-                                                else "Thinking…",
-                                                timestamp,
-                                            )
-                                        _scroll_to_bottom(transcript)
-                                    _set_content_if_attached(reasoning_md, reasoning_text)
-                                    status_row.set_visibility(False)
-                                elif active_tool is not None:
-                                    active_tool.label.set_text(oneline(delta, limit=60))
-                                    status_row.set_visibility(False)
+                                        pending.reasoning = (pending.reasoning or "") + delta
+                                    handle = handles.get(pending.id)
+                                    if handle is None or handle.reasoning_md is None:
+                                        handles = _render_transcript()
+                                        handle = handles.get(pending.id)
+                                    if handle is not None and handle.reasoning_md is not None:
+                                        _set_content_if_attached(
+                                            handle.reasoning_md, pending.reasoning or ""
+                                        )
+                                else:
+                                    handle = handles.get(pending.id)
+                                    if handle is not None:
+                                        for row in handle.tool_rows.values():
+                                            if row.spinner is not None:
+                                                row.label.set_text(oneline(delta, limit=60))
+                                                break
+                                    _scroll_to_bottom(transcript)
                             elif event.event == "tool.started":
                                 args = event.data.get("args") or event.data.get("preview")
-                                with _timeline():
-                                    active_tool = _live_tool_entry(
-                                        str(event.data.get("tool_name", "tool")),
-                                        str(args) if args else None,
-                                        timestamp,
-                                    )
-                                if reply_md is not None:
-                                    reply_entry = _timeline_entry_of(reply_md)
-                                    timeline_el = _timeline()
-                                    if reply_entry is not None and _is_attached(active_tool.entry):
-                                        try:
-                                            reply_index = next(
-                                                i
-                                                for i, child in enumerate(
-                                                    timeline_el.default_slot.children
-                                                )
-                                                if child is reply_entry
-                                            )
-                                        except StopIteration:
-                                            pass
-                                        else:
-                                            try:
-                                                active_tool.entry.move(timeline_el, reply_index)
-                                            except ValueError:
-                                                pass
-                                status_row.set_visibility(False)
+                                call_id = event.data.get("tool_call_id") or (
+                                    f"call_{len(tool_calls)}"
+                                )
+                                tool_calls.append(
+                                    {
+                                        "id": call_id,
+                                        "type": "function",
+                                        "function": {
+                                            "name": str(event.data.get("tool_name", "tool")),
+                                            "arguments": str(args) if args else "",
+                                        },
+                                    }
+                                )
+                                tool_status[call_id] = "running"
+                                handles = _render_transcript()
                                 _scroll_to_bottom(transcript)
                             elif event.event in {"tool.completed", "tool.failed"}:
-                                if active_tool is not None:
-                                    _delete_if_attached(active_tool.spinner)
-                                    icon = (
-                                        "error"
-                                        if event.event == "tool.failed"
-                                        else "check_circle"
+                                call_id = event.data.get("tool_call_id")
+                                if not call_id and tool_calls:
+                                    call_id = tool_calls[-1].get("id")
+                                if call_id:
+                                    tool_status[call_id] = (
+                                        "failed" if event.event == "tool.failed" else "done"
                                     )
-                                    marker = (
-                                        "live-tool-failed"
-                                        if event.event == "tool.failed"
-                                        else "live-tool-done"
-                                    )
-                                    if _is_attached(active_tool.row):
-                                        with active_tool.row:
-                                            active_tool.done_mark = ui.icon(icon).mark(marker)
-                                    active_tool = None
+                                    handles = _render_transcript()
                                 _scroll_to_bottom(transcript)
                             elif event.event == "assistant.delta":
-                                if reply_md is None:
-                                    with _timeline():
-                                        reply_md = _chat_bubble_shell(
-                                            "smart_toy", "secondary", "Hermes", timestamp
-                                        )
-                                reply_content += event.data.get("delta", "")
-                                _set_content_if_attached(reply_md, reply_content)
-                                status_row.set_visibility(False)
+                                pending.content = (pending.content or "") + event.data.get(
+                                    "delta", ""
+                                )
+                                handle = handles.get(pending.id)
+                                if handle is None or handle.reply_md is None:
+                                    handles = _render_transcript()
+                                    handle = handles.get(pending.id)
+                                if handle is not None and handle.reply_md is not None:
+                                    _set_content_if_attached(handle.reply_md, pending.content or "")
                                 _scroll_to_bottom(transcript)
                             elif event.event == "assistant.completed":
-                                if reply_md is None:
-                                    with _timeline():
-                                        reply_md = _chat_bubble_shell(
-                                            "smart_toy", "secondary", "Hermes", timestamp
-                                        )
-                                reply_content = event.data.get("content", reply_content)
-                                _set_content_if_attached(reply_md, reply_content)
-                                status_row.set_visibility(False)
+                                pending.content = event.data.get("content", pending.content or "")
+                                handle = handles.get(pending.id)
+                                if handle is None or handle.reply_md is None:
+                                    handles = _render_transcript()
+                                    handle = handles.get(pending.id)
+                                if handle is not None and handle.reply_md is not None:
+                                    _set_content_if_attached(handle.reply_md, pending.content or "")
                                 _scroll_to_bottom(transcript)
                             elif event.event == "run.completed":
                                 # Some gateway versions omit the terminal
                                 # tool.completed event when the run ends; the
                                 # run boundary still gives the live row a
                                 # definitive successful completion state.
-                                if active_tool is not None:
-                                    _delete_if_attached(active_tool.spinner)
-                                    if _is_attached(active_tool.row):
-                                        with active_tool.row:
-                                            active_tool.done_mark = ui.icon(
-                                                "check_circle"
-                                            ).mark("live-tool-done")
-                                    active_tool = None
+                                finalized = False
+                                for call in tool_calls:
+                                    call_id = call.get("id")
+                                    if call_id and tool_status.get(call_id) == "running":
+                                        tool_status[call_id] = "done"
+                                        finalized = True
                                 messages = event.data.get("messages")
                                 if isinstance(messages, list) and messages:
                                     del loaded_messages[turn_start:]
@@ -1052,21 +1153,27 @@ def register_pages(plugin: Plugin) -> None:
                                         for message in messages
                                         if isinstance(message, dict)
                                     )
+                                    active_message_id = None
+                                    tool_status = {}
                                     _render_transcript()
                                     _scroll_to_bottom(transcript)
-                                    reconciled = True
+                                elif finalized:
+                                    handles = _render_transcript()
+                                    _scroll_to_bottom(transcript)
                     except HermesError as exc:
-                        status_row.set_visibility(False)
                         ui.notify(f"Message failed: {exc}", type="negative")
                 finally:
                     current_run_id = None
+                    active_message_id = None
+                    tool_status = {}
                     _update_stop_visibility()
                     message_input.run_method("focus")
 
-                if not reconciled and not user_bubble_shown:
-                    _append_local_message("user", text, sent_at)
-                if not reconciled:
-                    _append_local_message("assistant", reply_content)
+                # Nothing extra to append on a non-reconciled turn: the
+                # locally-streamed user + assistant messages were already put
+                # in `loaded_messages` at turn start (and are what the timeline
+                # is currently showing), so a later transcript rebuild ("Load
+                # earlier") keeps them.
 
             async def send() -> None:
                 nonlocal session, streaming, stream_task, queued_text
