@@ -96,6 +96,20 @@ class Settings(BaseSettings):
     # How often the list re-scans the vault (also the store's cache TTL).
     xaelwiki_refresh_seconds: int = 30
 
+    # The `vnc` plugin shows the operator the Xvfb display a sandboxed browser
+    # bot drives (via noVNC), so a human can click/type when the bot hits a
+    # captcha/human-wall. A companion systemd service runs Xvfb :99 + x11vnc
+    # on `vnc_host:vnc_port` with a per-start password at `vnc_password_file`
+    # and writes help-requests to `vnc_state_dir`/state.json. `vnc_novnc_dir`
+    # is the noVNC package's install root (nixpkgs: <store>/share/webapps/
+    # novnc); when empty, the page renders a "client assets missing" notice
+    # instead of a live canvas.
+    vnc_novnc_dir: str = ""
+    vnc_state_dir: str = "/var/lib/hermes-vnc"
+    vnc_password_file: str = "/run/hermes-vnc/passwd"
+    vnc_host: str = "127.0.0.1"
+    vnc_port: int = 5901
+
     # The costs plugin reads provider API keys from this "KEY=value" env file
     # when they are not in the process environment.
     costs_env_file: str = "/run/agenix/hermes-env"

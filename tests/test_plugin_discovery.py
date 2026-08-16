@@ -24,6 +24,7 @@ async def test_discovers_installed_plugins(user: User, context: PluginContext) -
         "terminal",
         "kanban",
         "files",
+        "vnc",
         "xaelwiki",
     }
     await user.open("/")
@@ -33,4 +34,5 @@ async def test_discovers_installed_plugins(user: User, context: PluginContext) -
     await user.should_see("Terminal")
     await user.should_see("Kanban")
     await user.should_see("Files")
+    await user.should_see("VNC")
     await user.should_see("Notes")
