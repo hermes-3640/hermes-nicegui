@@ -82,11 +82,56 @@ _MAX_CHAT_ATTACHMENTS = 8
 
 
 def _unread_state() -> dict[str, float]:
-    """Per-browser map of session_id -> last-seen timestamp."""
+    """Per-browser map of session_id -> last-seen timestamp.
+
+    Primary storage is ``app.storage.user`` (NiceGUI's per-browser
+    session dict).  A server-side SQLite ``ReadStateStore`` underpins it
+    for cross-device sync: on page open the local dict is hydrated from
+    the store, and every mutation is persisted back.
+    """
     try:
         return app.storage.user.setdefault(_SEEN_KEY, {})
     except RuntimeError:  # pragma: no cover - storage disabled in some test setups
         return {}
+
+
+def _hydrate_read_state() -> None:
+    """Load the server-side read state into the local ``app.storage.user`` dict.
+
+    Called on each sessions-page open so a new device immediately sees
+    read state written by another browser.
+    """
+    from hermes_nicegui.web import current_username, state
+
+    if state.read_state_store is None:
+        return
+    try:
+        username = current_username()
+    except RuntimeError:
+        return
+    if not username:
+        return
+    server_state = state.read_state_store.load(username)
+    local = _unread_state()
+    # Merge: take the max timestamp per key so the "most-read" wins.
+    for key, ts in server_state.items():
+        if key not in local or ts > local[key]:
+            local[key] = ts
+
+
+def _persist_read_state() -> None:
+    """Write the current local read state to the server-side store."""
+    from hermes_nicegui.web import current_username, state
+
+    if state.read_state_store is None:
+        return
+    try:
+        username = current_username()
+    except RuntimeError:
+        return
+    if not username:
+        return
+    state.read_state_store.save(username, _unread_state())
 
 
 # -- transcript rendering ---------------------------------------------------
@@ -604,6 +649,7 @@ def register_pages(plugin: Plugin) -> None:
 
     def _mark_read(session_id: str) -> None:
         _unread_state()[session_id] = datetime.now().timestamp()
+        _persist_read_state()
 
     def _run_in_client(coro_factory: Callable[[], Any]) -> None:
         """Schedule an async handler as a background task, but re-enter the
@@ -655,6 +701,7 @@ def register_pages(plugin: Plugin) -> None:
                 return
             ui.notify("Session deleted", type="positive")
             _unread_state().pop(session_id, None)
+            _persist_read_state()
             if on_deleted:
                 on_deleted()
 
@@ -673,10 +720,12 @@ def register_pages(plugin: Plugin) -> None:
 
     @ui.page("/sessions", title="Sessions")
     async def sessions_page() -> None:
+        _hydrate_read_state()
         with frame(active="/sessions"):
 
             def _mark_all_read() -> None:
                 _unread_state()[ALL_READ_KEY] = datetime.now().timestamp()
+                _persist_read_state()
                 render_rows()
                 ui.notify("Marked all sessions as read", type="positive")
 

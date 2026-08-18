@@ -96,6 +96,74 @@ class UserStore:
         return bool(row) and verify_password(password, row[0])
 
 
+class ReadStateStore:
+    """Server-side read-state storage: per-user session-read timestamps.
+
+    Replaces the per-browser ``app.storage.user`` dict so read state
+    survives device switches.  A single ``read_state`` table in the same
+    ``users.db`` file keeps things simple — one DB, one file, one
+    permission boundary.
+
+    Schema::
+
+        CREATE TABLE IF NOT EXISTS read_state (
+            username TEXT NOT NULL,
+            key     TEXT NOT NULL,
+            ts      REAL NOT NULL,
+            PRIMARY KEY (username, key)
+        )
+
+    ``key`` is either a session id or the reserved ``__all__`` marker
+    (see ``logic.ALL_READ_KEY``).
+    """
+
+    def __init__(self, db_path: Path) -> None:
+        self.db_path = db_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS read_state ("
+            "username TEXT NOT NULL, key TEXT NOT NULL, ts REAL NOT NULL,"
+            " PRIMARY KEY (username, key))"
+        )
+        self._conn.commit()
+        with contextlib.suppress(PermissionError):
+            os.chmod(db_path, 0o600)
+
+    def load(self, username: str) -> dict[str, float]:
+        """Return ``{key: timestamp}`` for *username*."""
+        rows = self._conn.execute(
+            "SELECT key, ts FROM read_state WHERE username = ?", (username,)
+        ).fetchall()
+        return {row[0]: row[1] for row in rows}
+
+    def save(self, username: str, state: dict[str, float]) -> None:
+        """Replace the full read-state map for *username*."""
+        self._conn.execute("DELETE FROM read_state WHERE username = ?", (username,))
+        self._conn.executemany(
+            "INSERT INTO read_state (username, key, ts) VALUES (?, ?, ?)",
+            [(username, k, v) for k, v in state.items()],
+        )
+        self._conn.commit()
+
+    def set_key(self, username: str, key: str, ts: float) -> None:
+        """Upsert a single key (convenience for ``_mark_read``)."""
+        self._conn.execute(
+            "INSERT INTO read_state (username, key, ts) VALUES (?, ?, ?)"
+            " ON CONFLICT(username, key) DO UPDATE SET ts = excluded.ts",
+            (username, key, ts),
+        )
+        self._conn.commit()
+
+    def delete_key(self, username: str, key: str) -> None:
+        """Remove a single key (used when a session is deleted)."""
+        self._conn.execute(
+            "DELETE FROM read_state WHERE username = ? AND key = ?",
+            (username, key),
+        )
+        self._conn.commit()
+
+
 def load_or_create_secret(path: Path) -> str:
     """The ``ui.run(storage_secret=...)`` value, generated once and persisted.
 

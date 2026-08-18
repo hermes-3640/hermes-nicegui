@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 from loguru import logger as _logger
 from nicegui import app, ui
 
-from hermes_nicegui.auth import UserStore
+from hermes_nicegui.auth import ReadStateStore, UserStore
 from hermes_nicegui.plugin import NavItem, Plugin, PluginContext, load_plugins
 from hermes_nicegui.store import HermesStore, build_store
 
@@ -70,6 +70,14 @@ def set_current_profile(name: str) -> None:
         pass
 
 
+def current_username() -> str:
+    """The username logged in for this browser session, or ''."""
+    try:
+        return app.storage.user.get("username", "")
+    except RuntimeError:  # pragma: no cover - storage disabled in some test setups
+        return ""
+
+
 def current_executor() -> HermesExecutor:
     """``state.executor``, narrowed to non-``None``.
 
@@ -106,6 +114,7 @@ class AppState:
         self.client: HermesClient | None = None
         self.executor: HermesExecutor | None = None
         self.user_store: UserStore | None = None
+        self.read_state_store: ReadStateStore | None = None
         self.profiles: list[str] = []
         self.plugins: list[Plugin] = []
         self.nav_items: list[NavItem] = []
@@ -147,6 +156,7 @@ def build(
     # installed; the middleware is only ever added in `app.py::main`, never
     # here, so tests calling `build()` directly are never gated by it.
     state.user_store = UserStore(context.settings.data_dir_path / "users.db")
+    state.read_state_store = ReadStateStore(context.settings.data_dir_path / "users.db")
     state.profiles = profiles or []
     state.logger = context.logger
     state.plugins = plugins if plugins is not None else load_plugins(context)
