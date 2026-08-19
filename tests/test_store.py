@@ -148,8 +148,8 @@ async def test_kanban_list_tasks_orders_all_by_status_order(
 
     assert [task.id for task in tasks] == [
         "t_triage",
-        "t_ready_2",
         "t_ready_1",
+        "t_ready_2",
         "t_review",
         "t_blocked",
         "t_1",
@@ -158,9 +158,11 @@ async def test_kanban_list_tasks_orders_all_by_status_order(
     assert total == 7
 
 
-async def test_kanban_list_tasks_without_status_order_keeps_priority_sort(
+async def test_kanban_list_tasks_without_status_order_sorts_by_created_at(
     executor: HermesExecutor, fake_kanban
 ) -> None:
+    """With no `status_order`, tasks sort purely by created_at descending
+    (newest first) -- priority is not part of the sort at all."""
     for task in [
         {"id": "t_1", "status": "done", "priority": 1, "created_at": 400},
         {"id": "t_ready_1", "status": "ready", "priority": 1, "created_at": 300},
@@ -174,10 +176,10 @@ async def test_kanban_list_tasks_without_status_order_keeps_priority_sort(
 
     assert [task.id for task in tasks] == [
         "t_unknown",
-        "t_triage",
-        "t_ready_2",
-        "t_ready_1",
         "t_1",
+        "t_ready_1",
+        "t_ready_2",
+        "t_triage",
     ]
     assert total == 5
 

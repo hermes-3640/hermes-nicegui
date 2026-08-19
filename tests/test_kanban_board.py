@@ -12,7 +12,6 @@ from nicegui.testing import User
 from hermes_nicegui import web
 from hermes_nicegui.plugin import PluginContext
 from hermes_nicegui.plugins.kanban import KanbanPlugin
-from hermes_nicegui.plugins.kanban.gateway import KanbanClient
 from hermes_nicegui.plugins.kanban.logic import CANONICAL_COLUMNS
 from tests.conftest import FakeHermesCli, FakeKanban
 
@@ -135,7 +134,11 @@ async def test_board_paginates_with_numbered_pages(
                 "status": "ready",
                 "priority": 1,
                 "tenant": None,
-                "created_at": 1786620000 + i,
+                # Strictly older than the default t_1 fixture's created_at
+                # (1786620000) -- the board sorts newest-first within a
+                # status, so t_1 (the single newest task) is guaranteed page
+                # 1 and the extras split 29/6 across the two pages by age.
+                "created_at": 1786619000 + i,
                 "started_at": None,
                 "completed_at": None,
                 "consecutive_failures": 0,
@@ -151,7 +154,7 @@ async def test_board_paginates_with_numbered_pages(
 
     pager = cast(ui.pagination, next(iter(user.find(marker="page-control").elements)))
     pager.set_value(2)
-    await user.should_see("Extra task 29", retries=10)
+    await user.should_see("Extra task 0", retries=10)
     assert len(user.find(marker="task-card").elements) == 6
     await user.should_not_see("Fix flaky test", retries=10)
 
@@ -372,14 +375,13 @@ async def test_create_task_empty_body_non_triage_warns(
 
 
 async def test_same_priority_tasks_sorted_by_created_at(
-    user: User, context: PluginContext, kanban_client: KanbanClient, fake_kanban: FakeKanban
+    user: User, kanban_context: PluginContext, fake_kanban: FakeKanban
 ) -> None:
-    """Tasks sharing a priority level are ordered by created_at ascending
-    (oldest first) — the secondary sort after priority DESC."""
+    """Within a status group, tasks sort by created_at descending (newest
+    first) -- see `_kanban_list_sql`'s "status first, newest at top" order."""
     # Insert two tasks at the same priority (2) with different created_at,
     # plus the default t_1 fixture (priority 2, created_at 1786620000).
-    # Reverse-insert order: newest first, oldest last, so the DB has them
-    # out of date order — the SQL sort must reorder them.
+    # Insert out of date order so the SQL sort must reorder them.
     fake_kanban.insert_task(
         {
             "id": "t_newest",
@@ -416,7 +418,7 @@ async def test_same_priority_tasks_sorted_by_created_at(
             "session_id": None,
         }
     )
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open("/kanban")
     # Wait for the board to load
     await user.should_see("Fix flaky test", retries=10)
@@ -433,7 +435,7 @@ async def test_same_priority_tasks_sorted_by_created_at(
     # Filter to just the three priority-2 ready tasks
     p2_ready = [t for t in tasks if t.priority == 2 and t.status == "ready"]
     ids = [t.id for t in p2_ready]
-    # Oldest first, then t_1 (middle), then newest last
-    assert ids == ["t_oldest", "t_1", "t_newest"], (
-        f"Expected oldest-first date sort within priority, got order: {ids}"
+    # Newest first, then t_1 (middle), then oldest last
+    assert ids == ["t_newest", "t_1", "t_oldest"], (
+        f"Expected newest-first date sort within status, got order: {ids}"
     )
