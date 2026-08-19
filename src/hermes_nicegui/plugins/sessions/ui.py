@@ -1555,6 +1555,13 @@ def register_pages(plugin: Plugin) -> None:
                     active_message_id = None
                     tool_status = {}
                     _sync_streaming_controls()
+                    # Refresh the read watermark so the session doesn't
+                    # flip back to unread when the user returns to the
+                    # sessions list.  ``last_active`` advances on every
+                    # server-side message, but ``_mark_read`` was only
+                    # called once at page open — without this touch the
+                    # session immediately looks unread again (#read-track).
+                    _mark_read(session_id)
                     message_input.run_method("focus")
 
             async def send() -> None:
