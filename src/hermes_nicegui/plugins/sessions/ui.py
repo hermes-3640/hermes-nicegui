@@ -1428,11 +1428,31 @@ def register_pages(plugin: Plugin) -> None:
                                     loaded_messages[:] = [
                                         m for m in loaded_messages if m.id not in turn_local_ids
                                     ]
-                                    loaded_messages[insert_at:insert_at] = [
-                                        Message.from_json(message)
-                                        for message in messages
-                                        if isinstance(message, dict)
-                                    ]
+                                    reconciled: list[Message] = []
+                                    for message in messages:
+                                        # The gateway's `run.completed` payload
+                                        # has been observed omitting `id`
+                                        # entirely on some entries (confirmed
+                                        # live: `_message_response` only
+                                        # includes a key when it's already
+                                        # present on the source message,
+                                        # dropping `id` rather than sending it
+                                        # `null`) -- `Message.from_json` needs
+                                        # it, so a single malformed entry must
+                                        # not take down this whole
+                                        # reconciliation (and, uncaught, the
+                                        # entire live-rendering coroutine)
+                                        # along with every *valid* entry
+                                        # after it in the same payload.
+                                        if not isinstance(message, dict) or "id" not in message:
+                                            logger.warning(
+                                                "run.completed: dropping malformed message "
+                                                "(missing 'id'): {}",
+                                                message,
+                                            )
+                                            continue
+                                        reconciled.append(Message.from_json(message))
+                                    loaded_messages[insert_at:insert_at] = reconciled
                                     active_message_id = None
                                     tool_status = {}
                                     _render_history()

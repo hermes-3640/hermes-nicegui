@@ -178,6 +178,49 @@ async def test_live_render_keeps_multiple_assistant_messages_separate(
     await user.should_not_see("memory.Got it")
 
 
+async def test_run_completed_reconciliation_skips_message_missing_id(
+    user: User, context: PluginContext, hermes
+) -> None:
+    """The gateway's `run.completed` payload has been observed omitting `id`
+    entirely on some message entries (confirmed live against hermes.lan's
+    production logs: `Message.from_json` raised `KeyError: 'id'` inside this
+    reconciliation, repeatedly, with no exception handler anywhere in the
+    live-rendering coroutine -- silently killing it mid-turn, which read as
+    "the page just freezes" since NiceGUI itself stayed healthy, and dropped
+    every *valid* message in the same payload along with the bad one). One
+    malformed entry must not take down the whole reconciliation."""
+    hermes.stream_events = [
+        ("run.started", {"run_id": "run_bad_id"}),
+        ("message.started", {"message": {"id": 40, "role": "assistant"}}),
+        ("assistant.delta", {"message_id": 40, "delta": "Working on it."}),
+        (
+            "run.completed",
+            {
+                "completed": True,
+                "usage": {},
+                "messages": [
+                    {"session_id": "sess-1", "role": "assistant", "content": "Working on it."},
+                    {
+                        "id": 40,
+                        "session_id": "sess-1",
+                        "role": "assistant",
+                        "content": "All done.",
+                    },
+                ],
+            },
+        ),
+        ("done", {}),
+    ]
+    web.build(context, [SessionsPlugin(context)])
+    await user.open("/sessions/sess-1")
+    await user.should_see("How do I access your API?")
+
+    user.find(marker="chat-input").type("do the thing")
+    user.find(marker="chat-send").click()
+
+    await user.should_see("All done.", retries=20)
+
+
 async def test_live_tool_cleanup_ignores_detached_spinner(
     user: User, context: PluginContext, hermes
 ) -> None:
