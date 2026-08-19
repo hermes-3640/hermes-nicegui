@@ -20,6 +20,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 from hermes_nicegui import hermes_cli
 from hermes_nicegui.executor import HermesExecutor
@@ -481,14 +482,43 @@ class KanbanStore:
     any `profiles/<name>/`), so unlike `SessionsStore`/`CronStore` this
     takes no `profile` -- reads always go to `profile=""` (the root).
 
-    Read-only on purpose: kanban's CLI (`hermes kanban ...`) is a
-    task-lifecycle tool (block/unblock/promote/complete/...), not a
-    generic field-setter, so it doesn't cover what the board UI's
-    create/edit/delete/comment/dispatch actions need. Those keep going
-    through `KanbanClient` (dashboard REST) -- see `plugins/kanban/ui.py`.
+    Reads go straight at `kanban.db`; writes delegate to
+    `HermesExecutor`'s dashboard-REST methods -- kanban's CLI (`hermes
+    kanban ...`) is a task-lifecycle tool (block/unblock/promote/
+    complete/...), not a generic field-setter, so title/body/priority
+    edits and arbitrary status moves can't go through the CLI the way
+    cron's/sessions' writes do. See `HermesExecutor`'s "kanban writes"
+    section.
     """
 
     executor: HermesExecutor
+
+    async def create(
+        self,
+        *,
+        title: str,
+        body: str = "",
+        assignee: str = "default",
+        priority: int = 2,
+        status: str | None = None,
+        skills: list[str] | None = None,
+    ) -> Task:
+        return await self.executor.create_kanban_task(
+            title=title, body=body, assignee=assignee, priority=priority, status=status,
+            skills=skills,
+        )
+
+    async def save_fields(self, task_id: str, fields: dict[str, Any]) -> Task:
+        return await self.executor.update_kanban_task(task_id, fields)
+
+    async def move_status(self, task_id: str, status: str) -> Task:
+        return await self.executor.update_kanban_task(task_id, {"status": status})
+
+    async def delete(self, task_id: str) -> None:
+        await self.executor.delete_kanban_task(task_id)
+
+    async def add_comment(self, task_id: str, body: str) -> None:
+        await self.executor.add_kanban_comment(task_id, body)
 
     async def list_tasks(
         self,

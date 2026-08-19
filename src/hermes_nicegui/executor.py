@@ -24,6 +24,17 @@ JSON request over stdin, replying with a JSON value on stdout) -- no new
 remote dependency, and no shell-escaping of the query/path since nothing is
 interpolated into the script text itself.
 
+A third capability lives here too: kanban's *writes* (create/edit/move/
+delete/comment). Kanban's CLI (`hermes kanban ...`) is a task-lifecycle tool
+with no generic field-setter -- `hermes kanban edit` only patches recovery
+fields on an already-*completed* task, nothing lets you rewrite an open
+task's title/body/priority or move it to an arbitrary status -- so those
+writes go over the Hermes CLI's own dashboard web server instead (cookie/
+password auth, a different server than the gateway's bearer-token API). This
+still belongs on `HermesExecutor`, not a plugin-owned client: the point of
+this class is being the one place that knows how to reach a given daemon,
+regardless of which transport a particular operation happens to need.
+
 The CLI-subprocess argv-building path (`argv`) serves interactive pty
 commands and one-shot mutations (`run`) alike, but only the former should
 pass `tty=True`. Forcing a remote pty (`ssh -tt`) on a one-shot,
@@ -44,7 +55,10 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from hermes_nicegui.gateway import HermesError
+import httpx
+
+from hermes_nicegui.dashboard_auth import DashboardError, DashboardSession
+from hermes_nicegui.gateway import HermesError, Task
 
 
 @dataclass
@@ -175,15 +189,27 @@ class HermesExecutor:
         ssh_target: str = "",
         ssh_options: list[str] | None = None,
         hermes_home: str = "~/.hermes",
+        remote_python_bin: str = "python3",
+        dashboard_url: str = "",
+        dashboard_username: str = "",
+        dashboard_password: str = "",
         run_fn: Callable[[list[str]], Awaitable[CompletedResult]] | None = None,
         io_run_fn: Callable[[list[str], str], Awaitable[CompletedResult]] | None = None,
+        dashboard_transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        """``run_fn``/``io_run_fn`` are injectable so tests can fake the
-        actual subprocess launch without touching a real process -- mirrors
-        ``transport`` on ``HermesClient``/``KanbanClient`` (fake at the
-        subprocess boundary, exercise the real class above it). Both default
-        to real subprocess launches; ``io_run_fn`` additionally writes
-        ``input_text`` to the child's stdin (see ``_run_remote_io``).
+        """``run_fn``/``io_run_fn``/``dashboard_transport`` are injectable so
+        tests can fake the actual subprocess launch or HTTP transport without
+        touching a real process or network -- mirrors ``transport`` on
+        ``HermesClient`` (fake at the boundary, exercise the real class above
+        it). ``run_fn``/``io_run_fn`` default to real subprocess launches;
+        ``io_run_fn`` additionally writes ``input_text`` to the child's
+        stdin (see ``_run_remote_io``). ``dashboard_transport`` defaults to a
+        real network transport; the ``DashboardSession`` it backs is built
+        lazily (see ``_dashboard``) since ``dashboard_url`` is empty unless
+        the kanban plugin is actually in use. ``remote_python_bin`` is the
+        interpreter `_remote_io_argv` invokes over ssh for reads -- override
+        it (an absolute path) when a host's non-interactive PATH doesn't
+        include a bare ``python3``.
         """
         if mode not in ("local", "ssh"):
             raise ValueError(f"unknown exec mode: {mode!r}")
@@ -194,10 +220,16 @@ class HermesExecutor:
         self.ssh_target = ssh_target
         self.ssh_options = ssh_options or []
         self.hermes_home = hermes_home
+        self.remote_python_bin = remote_python_bin
+        self.dashboard_url = dashboard_url
+        self.dashboard_username = dashboard_username
+        self.dashboard_password = dashboard_password
         self._run_fn = run_fn or _run_subprocess
         self._io_run_fn = io_run_fn or (
             lambda argv, input_text: _run_subprocess(argv, input_text=input_text)
         )
+        self._dashboard_transport = dashboard_transport
+        self._dashboard: DashboardSession | None = None
 
     def argv(self, *args: str, profile: str = "", tty: bool = False) -> list[str]:
         """Full argv for `hermes *args`, local or ssh.
@@ -234,10 +266,18 @@ class HermesExecutor:
         return f"{base}/profiles/{profile}"
 
     def _remote_io_argv(self) -> list[str]:
-        # `python3 -` (read the program from stdin), not `-c <script>` -- see
-        # the module-level comment above `_REMOTE_IO_SCRIPT_TEMPLATE` for why
-        # a `-c` argv element doesn't survive being relayed through ssh.
-        return ["ssh", *self.ssh_options, self.ssh_target, "python3", "-"]
+        # `<remote_python_bin> -` (read the program from stdin), not `-c
+        # <script>` -- see the module-level comment above
+        # `_REMOTE_IO_SCRIPT_TEMPLATE` for why a `-c` argv element doesn't
+        # survive being relayed through ssh. `remote_python_bin` defaults to
+        # bare `python3` (found on most hosts' PATH) but is configurable --
+        # confirmed live against a NixOS host (`hermes.lan`) where a
+        # non-interactive root SSH session has no `python3` on `PATH` at all
+        # (only `hermes` itself resolves, via a wrapper that bundles its own
+        # interpreter); that host needs an absolute path to a real dynamically
+        # runnable Python (e.g. the one `hermes`'s own wrapper script sets as
+        # `$HERMES_PYTHON`) instead.
+        return ["ssh", *self.ssh_options, self.ssh_target, self.remote_python_bin, "-"]
 
     async def _run_remote_io(self, request: dict[str, Any]) -> Any:
         script = _build_remote_io_script(request)
@@ -266,6 +306,19 @@ class HermesExecutor:
         dict's *keys* into positional params instead).
         """
         path = f"{self.profile_home(profile)}/{relative_db_path}"
+        if self.mode == "local":
+            return await asyncio.to_thread(_read_sqlite_local, path, sql, params)
+        request = {"op": "sqlite", "path": path, "sql": sql, "params": params}
+        return await self._run_remote_io(request)
+
+    async def read_sqlite_abs(
+        self, path: str, sql: str, params: Sequence[Any] | dict[str, Any] = ()
+    ) -> list[dict]:
+        """Read-only query against a SQLite database at an absolute path,
+        outside any profile's data directory -- e.g. another tool's own
+        database (OpenCode's `~/.local/share/opencode/opencode-stable.db`)
+        that happens to live on the same host as the daemon. Same local/ssh
+        dispatch as `read_sqlite`, just without the `profile_home` join."""
         if self.mode == "local":
             return await asyncio.to_thread(_read_sqlite_local, path, sql, params)
         request = {"op": "sqlite", "path": path, "sql": sql, "params": params}
@@ -313,3 +366,82 @@ class HermesExecutor:
         else:
             names = await self._run_remote_io({"op": "listdir", "path": base})
         return ["default", *sorted(n for n in names if not n.startswith("."))]
+
+    # -- kanban writes: the dashboard's REST API, not the CLI ---------------
+    #
+    # Kanban's CLI has no generic field-setter for an open task (`hermes
+    # kanban edit` only patches recovery fields on an already-completed
+    # task), so title/body/priority edits and arbitrary status moves go over
+    # the CLI's own dashboard web server instead -- cookie/password auth, a
+    # different server than the gateway's bearer-token API. Independent of
+    # `mode`/ssh: the dashboard is its own network-exposed HTTP port, not
+    # something reached by shelling out.
+
+    def _dashboard_session(self) -> DashboardSession:
+        if self._dashboard is None:
+            self._dashboard = DashboardSession(
+                self.dashboard_url,
+                self.dashboard_username,
+                self.dashboard_password,
+                transport=self._dashboard_transport,
+            )
+        return self._dashboard
+
+    async def create_kanban_task(
+        self,
+        *,
+        title: str,
+        body: str = "",
+        assignee: str = "default",
+        priority: int = 2,
+        status: str | None = None,
+        skills: list[str] | None = None,
+    ) -> Task:
+        """Create a task. The API always creates tasks as ``ready`` -- there's
+        no ``status`` field on create -- so if the caller wants a different
+        starting status (e.g. the safer ``triage``, which the live dispatcher
+        won't pick up), this issues a follow-up update.
+        """
+        payload: dict[str, Any] = {
+            "title": title,
+            "body": body,
+            "assignee": assignee,
+            "priority": priority,
+        }
+        if skills:
+            payload["skills"] = skills
+        try:
+            data = await self._dashboard_session().request(
+                "POST", "/api/plugins/kanban/tasks", json=payload
+            )
+        except DashboardError as exc:
+            raise HermesError(str(exc)) from exc
+        task = Task.from_json(data["task"])
+        if status and status != task.status:
+            task = await self.update_kanban_task(task.id, {"status": status})
+        return task
+
+    async def update_kanban_task(self, task_id: str, fields: dict[str, Any]) -> Task:
+        try:
+            data = await self._dashboard_session().request(
+                "PATCH", f"/api/plugins/kanban/tasks/{task_id}", json=fields
+            )
+        except DashboardError as exc:
+            raise HermesError(str(exc)) from exc
+        return Task.from_json(data["task"])
+
+    async def delete_kanban_task(self, task_id: str) -> None:
+        try:
+            await self._dashboard_session().request(
+                "DELETE", f"/api/plugins/kanban/tasks/{task_id}"
+            )
+        except DashboardError as exc:
+            raise HermesError(str(exc)) from exc
+
+    async def add_kanban_comment(self, task_id: str, body: str) -> None:
+        try:
+            await self._dashboard_session().request(
+                "POST", f"/api/plugins/kanban/tasks/{task_id}/comments", json={"body": body}
+            )
+        except DashboardError as exc:
+            raise HermesError(str(exc)) from exc

@@ -136,6 +136,48 @@ async def test_live_tool_call_precedes_streamed_reply(
     await user.should_see("terminal:")
 
 
+async def test_live_render_keeps_multiple_assistant_messages_separate(
+    user: User, context: PluginContext, hermes
+) -> None:
+    """A single run can produce more than one assistant message -- reason,
+    call a tool, reason again, call another, only then reply -- each its own
+    message server-side (confirmed against a real `run.completed` transcript).
+    The live path used to treat the whole run as one pending message,
+    concatenating every step's own `content` into one string with no
+    separator between them -- confirmed live: a session doing a two-step
+    tool loop rendered its intermediate reply glued directly onto its final
+    one (`"...memory.Got it — ..."`, no space, no line break)."""
+    hermes.stream_events = [
+        ("run.started", {"run_id": "run_multi"}),
+        ("message.started", {"message": {"id": 30, "role": "assistant"}}),
+        ("assistant.delta", {"message_id": 30, "delta": "I'll store that in your memory."}),
+        (
+            "assistant.completed",
+            {"message_id": 30, "content": "I'll store that in your memory."},
+        ),
+        (
+            "tool.started",
+            {"message_id": 31, "tool_call_id": "call_b", "tool_name": "capture", "args": "{}"},
+        ),
+        ("tool.completed", {"message_id": 31, "tool_call_id": "call_b", "tool_name": "capture"}),
+        ("message.started", {"message": {"id": 32, "role": "assistant"}}),
+        ("assistant.delta", {"message_id": 32, "delta": "Got it — saved."}),
+        ("assistant.completed", {"message_id": 32}),
+        ("run.completed", {"completed": True, "usage": {}}),
+        ("done", {}),
+    ]
+    web.build(context, [SessionsPlugin(context)])
+    await user.open("/sessions/sess-1")
+    await user.should_see("How do I access your API?")
+
+    user.find(marker="chat-input").type("remember this")
+    user.find(marker="chat-send").click()
+
+    await user.should_see("Got it — saved.", retries=20)
+    await user.should_see("I'll store that in your memory.")
+    await user.should_not_see("memory.Got it")
+
+
 async def test_live_tool_cleanup_ignores_detached_spinner(
     user: User, context: PluginContext, hermes
 ) -> None:
@@ -189,6 +231,37 @@ async def test_live_tool_cleanup_ignores_detached_spinner(
     assert slot is not None
     slot.parent.delete()  # detach the whole row
     _delete_if_attached(live_tool.spinner)
+
+
+async def test_compressed_messages_get_a_boundary_marker(
+    user: User, context: PluginContext
+) -> None:
+    """A run of ``compacted`` messages followed by a live one gets a
+    "Context compressed" divider ahead of the live message -- the visible
+    trace of the daemon's in-place context compaction (``state.db``'s
+    ``messages.compacted``), which otherwise leaves no visual cue that older
+    turns were archived and summarized away."""
+    web.build(context, [SessionsPlugin(context)])
+    await user.open("/sessions/sess-1")
+    await user.should_see("How do I access your API?")
+
+    messages = [
+        Message(
+            id=101, session_id="sess-1", role="user", content="archived turn one",
+            compacted=True,
+        ),
+        Message(
+            id=102, session_id="sess-1", role="assistant", content="archived reply",
+            compacted=True,
+        ),
+        Message(
+            id=103, session_id="sess-1", role="user", content="summary handoff",
+        ),
+    ]
+    timeline = next(iter(user.find(kind=ui.timeline).elements))
+    with timeline:
+        render_transcript_events(messages)
+    await user.should_see("Context compressed — 2 earlier messages archived")
 
 
 async def test_no_thinking_spinner_during_turn(user: User, context: PluginContext, hermes) -> None:

@@ -36,7 +36,6 @@ from hermes_nicegui.config import Settings
 from hermes_nicegui.executor import CompletedResult, HermesExecutor
 from hermes_nicegui.gateway import HermesClient
 from hermes_nicegui.plugin import PluginContext
-from hermes_nicegui.plugins.kanban.gateway import KanbanClient
 
 
 class _AsyncSSEStream(httpx.AsyncByteStream):
@@ -533,7 +532,8 @@ CREATE TABLE sessions (
 CREATE TABLE messages (
     id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT,
     tool_call_id TEXT, tool_calls TEXT, tool_name TEXT, timestamp REAL,
-    finish_reason TEXT, reasoning TEXT
+    finish_reason TEXT, reasoning TEXT,
+    active INTEGER DEFAULT 1, compacted INTEGER DEFAULT 0
 );
 """
 
@@ -1057,7 +1057,7 @@ def make_context(
     can ask for it directly instead of reaching for env vars or markers.
     """
 
-    def _make(**settings_kwargs: Any) -> PluginContext:
+    def _make(*, executor: HermesExecutor = executor, **settings_kwargs: Any) -> PluginContext:
         settings = Settings(
             gateway_url="http://hermes.test",
             api_token="test-token",
@@ -1091,13 +1091,15 @@ def context(make_context: Callable[..., PluginContext]) -> PluginContext:
 
 # -- fake kanban dashboard (writes) + kanban.db (reads) -----------------------
 #
-# Kanban board *reads* go through `web.current_store().kanban` -- direct
-# SQLite against `hermes_home/kanban.db` (a real file, like sessions/cron's
-# state.db/jobs.json above). Kanban *writes* still go through `KanbanClient`
-# (dashboard cookie-auth REST -- kanban's CLI has no generic field-setter,
-# see `plugins/kanban/ui.py`'s module docstring), faked here the same way as
-# before. What's new: each write handler mirrors its change into the same
-# `kanban.db` file the read path sees, since a real dashboard write and a
+# Kanban board *reads* and *writes* both go through `web.current_store().kanban`
+# -- reads are direct SQLite against `hermes_home/kanban.db` (a real file,
+# like sessions/cron's state.db/jobs.json above); writes delegate to
+# `HermesExecutor`'s dashboard-REST methods (kanban cookie-auth REST --
+# kanban's CLI has no generic field-setter, see `plugins/kanban/ui.py`'s
+# module docstring), faked here via `HermesExecutor(dashboard_transport=...)`
+# (see the `kanban_executor` fixture below). Each write handler mirrors its
+# change into the same `kanban.db` file the read path sees, since a real
+# dashboard write and a
 # real direct SQLite read are both ultimately looking at the *same* on-disk
 # database in production -- a UI test that creates a task via the dialog and
 # then expects the (re-read) board to show it depends on that being true here
@@ -1375,10 +1377,27 @@ def fake_kanban(hermes_home: Path) -> FakeKanban:
 
 
 @pytest.fixture
-def kanban_client(fake_kanban: FakeKanban) -> KanbanClient:
-    return KanbanClient(
-        "http://kanban.test",
-        "admin",
-        "test-password",
-        transport=httpx.MockTransport(fake_kanban.handle),
+def kanban_executor(
+    make_executor: Callable[..., HermesExecutor], fake_kanban: FakeKanban
+) -> HermesExecutor:
+    """A `HermesExecutor` whose dashboard-REST calls (kanban writes) are
+    faked against `FakeKanban` -- mirrors `executor`, but with the dashboard
+    transport wired in, since the plain `executor` fixture has no dashboard
+    config and would hit a real (nonexistent) `http://` URL if a kanban
+    write test used it."""
+    return make_executor(
+        dashboard_transport=httpx.MockTransport(fake_kanban.handle),
+        dashboard_url="http://kanban.test",
+        dashboard_username="admin",
+        dashboard_password="test-password",
     )
+
+
+@pytest.fixture
+def kanban_context(
+    make_context: Callable[..., PluginContext], kanban_executor: HermesExecutor
+) -> PluginContext:
+    """Like `context`, but built on `kanban_executor` so kanban writes reach
+    `FakeKanban` instead of the plain `executor` fixture's unconfigured
+    dashboard transport."""
+    return make_context(executor=kanban_executor)

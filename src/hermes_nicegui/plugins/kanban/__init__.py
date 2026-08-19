@@ -1,17 +1,18 @@
 """Kanban plugin: view and manage tasks on the Hermes dashboard's kanban board.
 
-Unlike the other plugins here, this one does **not** use ``context.client``
-(the main gateway's `HermesClient`) -- the kanban board lives on a different
-server, the Hermes CLI's own dashboard web server (cookie/password auth), so
-the plugin builds and owns its own
-:class:`~hermes_nicegui.plugins.kanban.gateway.KanbanClient` instead.
+Reads and writes alike go through ``context.executor`` (a ``HermesExecutor``)
+-- unlike the other plugins here, this one's *writes* end up on the Hermes
+CLI's own dashboard web server (cookie/password auth) rather than the CLI
+itself or the main gateway, but that's ``HermesExecutor``'s concern (see its
+"kanban writes" section), not this plugin's. See ``hermes_nicegui.app``'s
+``_bootstrap`` for where the dashboard credentials get wired into the
+executor.
 """
 
 from __future__ import annotations
 
-from hermes_nicegui.plugin import Plugin, PluginContext
+from hermes_nicegui.plugin import Plugin
 
-from .gateway import KanbanClient
 from .ui import register_pages
 
 
@@ -20,16 +21,6 @@ class KanbanPlugin(Plugin):
     title = "Kanban"
     icon = "view_kanban"
     route = "/kanban"
-
-    def __init__(
-        self, context: PluginContext, *, kanban_client: KanbanClient | None = None
-    ) -> None:
-        super().__init__(context)
-        self.kanban_client = kanban_client or KanbanClient(
-            context.settings.kanban_url,
-            context.settings.kanban_username,
-            context.settings.kanban_password,
-        )
 
     def register(self) -> None:
         register_pages(self)

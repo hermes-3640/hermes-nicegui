@@ -168,7 +168,7 @@ class CronRun:
 class Task:
     """A kanban task. ``raw`` keeps the full record for anything not
     modelled here. Shared between the dashboard REST client
-    (``plugins/kanban/gateway.py::KanbanClient``, still used for kanban
+    (``HermesExecutor``'s dashboard-REST methods, still used for kanban
     *writes*) and direct SQLite reads (``hermes_nicegui.store.KanbanStore``)
     -- lives in core ``gateway.py`` (alongside ``Job``, cron's own
     dataclass) rather than under ``plugins/kanban/`` so both can use it
@@ -301,6 +301,8 @@ class Message:
     timestamp: float | None = None
     finish_reason: str | None = None
     reasoning: str | None = None
+    active: bool = True
+    compacted: bool = False
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> Message:
@@ -315,6 +317,8 @@ class Message:
             timestamp=data.get("timestamp"),
             finish_reason=data.get("finish_reason"),
             reasoning=data.get("reasoning"),
+            active=bool(data.get("active", 1)),
+            compacted=bool(data.get("compacted", 0)),
         )
 
 

@@ -2,11 +2,11 @@
 
 The dashboard (the Hermes CLI's own web UI process -- cookie/password login,
 not the gateway's bearer token) backs kanban's mutations
-(``plugins/kanban/gateway.py::KanbanClient``) -- the one plugin whose writes
-have no CLI/direct-SQLite equivalent. Cron used to share this (dashboard
-REST for job listing/updates) but no longer does: both cron's reads
-(`cron/jobs.json`) and writes (`hermes cron edit`/...) now go straight at the
-daemon (see ``hermes_nicegui.store``).
+(``HermesExecutor``'s ``create_kanban_task``/``update_kanban_task``/etc) --
+the one plugin whose writes have no CLI/direct-SQLite equivalent. Cron used
+to share this (dashboard REST for job listing/updates) but no longer does:
+both cron's reads (`cron/jobs.json`) and writes (`hermes cron edit`/...) now
+go straight at the daemon (see ``hermes_nicegui.store``).
 """
 
 from __future__ import annotations
