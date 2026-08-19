@@ -1554,15 +1554,17 @@ def register_pages(plugin: Plugin) -> None:
                     current_run_id = None
                     active_message_id = None
                     tool_status = {}
-                    _sync_streaming_controls()
-                    # Refresh the read watermark so the session doesn't
-                    # flip back to unread when the user returns to the
-                    # sessions list.  ``last_active`` advances on every
-                    # server-side message, but ``_mark_read`` was only
-                    # called once at page open — without this touch the
-                    # session immediately looks unread again (#read-track).
+                    # Refresh the read watermark BEFORE touching any UI
+                    # elements — if the page was torn down (user navigated
+                    # away mid-turn), the UI calls below will throw and
+                    # would skip _mark_read entirely, leaving the session
+                    # permanently unread (#read-track).
                     _mark_read(session_id)
-                    message_input.run_method("focus")
+                    try:
+                        _sync_streaming_controls()
+                        message_input.run_method("focus")
+                    except Exception:
+                        pass  # page torn down; watermark is already set
 
             async def send() -> None:
                 nonlocal session, streaming, stream_task, queued_turn
