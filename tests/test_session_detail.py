@@ -6,6 +6,7 @@ import asyncio
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
+from unittest.mock import patch
 
 from nicegui import ui
 from nicegui.elements.upload_files import SmallFileUpload
@@ -346,6 +347,189 @@ async def test_run_completed_reconciles_authoritative_transcript(
     await user.should_see("Authoritative final")
     await user.should_see("terminal:")
     await user.should_not_see("streamed reply")
+
+
+async def test_concurrent_tool_calls_attribute_completion_correctly(
+    user: User, context: PluginContext, hermes
+) -> None:
+    """Two tool calls in flight at once, completing in reverse start order,
+    must each land on their own row -- not on "whichever was started last"
+    (the daemon's chat-stream endpoint never sends a tool_call_id on
+    tool.completed, so the client can only disambiguate by name)."""
+    hermes.stream_events = [
+        ("run.started", {"run_id": "run_concurrent"}),
+        ("message.started", {"message": {"id": 20, "role": "assistant"}}),
+        ("tool.started", {"message_id": 20, "tool_name": "terminal", "args": '{"command": "ls"}'}),
+        ("tool.started", {"message_id": 20, "tool_name": "web_search", "args": '{"q": "weather"}'}),
+        # web_search started 2nd but finishes 1st; terminal started 1st but finishes 2nd.
+        ("tool.completed", {"message_id": 20, "tool_name": "web_search"}),
+        ("tool.completed", {"message_id": 20, "tool_name": "terminal"}),
+        ("assistant.delta", {"message_id": 20, "delta": "Done"}),
+        ("assistant.completed", {"message_id": 20, "content": "Done"}),
+        ("run.completed", {"completed": True, "usage": {}}),
+        ("done", {}),
+    ]
+    web.build(context, [SessionsPlugin(context)])
+    await user.open("/sessions/sess-1")
+    await user.should_see("How do I access your API?")
+
+    user.find(marker="chat-input").type("run two tools")
+    user.find(marker="chat-send").click()
+
+    await user.should_see("terminal:")
+    await user.should_see("web_search:")
+    done_marks = user.find(marker="live-tool-done").elements
+    for _ in range(30):
+        if len(done_marks) >= 2:
+            break
+        await asyncio.sleep(0.05)
+        done_marks = user.find(marker="live-tool-done").elements
+    assert len(done_marks) == 2, "both tool rows should finish -- neither stuck spinning"
+
+
+async def test_queued_message_survives_authoritative_reconciliation(
+    user: User, context: PluginContext, hermes
+) -> None:
+    """A message queued mid-turn must not be wiped out when the *current*
+    turn's own run.completed reconciliation replaces its messages."""
+    hermes.stream_delay = 0.2
+    hermes.stream_events = [
+        ("run.started", {"run_id": "run_first"}),
+        ("message.started", {"message": {"id": 20, "role": "assistant"}}),
+        ("assistant.delta", {"message_id": 20, "delta": "first reply"}),
+        ("assistant.completed", {"message_id": 20, "content": "first reply"}),
+        (
+            "run.completed",
+            {
+                "completed": True,
+                "usage": {},
+                "messages": [
+                    {
+                        "id": 30,
+                        "session_id": "sess-1",
+                        "role": "user",
+                        "content": "first turn",
+                        "timestamp": 1786620100.0,
+                    },
+                    {
+                        "id": 31,
+                        "session_id": "sess-1",
+                        "role": "assistant",
+                        "content": "first reply (authoritative)",
+                        "timestamp": 1786620101.0,
+                    },
+                ],
+            },
+        ),
+        ("done", {}),
+    ]
+    web.build(context, [SessionsPlugin(context)])
+    await user.open("/sessions/sess-1")
+    await user.should_see("How do I access your API?")
+
+    user.find(marker="chat-input").type("first turn")
+    user.find(marker="chat-send").click()
+    await asyncio.sleep(0.05)  # let the first turn start streaming
+
+    user.find(marker="chat-input").type("second turn")
+    user.find(marker="chat-send").click()
+    await user.should_see("Queued — will send after this turn completes")
+
+    # The reconciled first turn lands...
+    await user.should_see("first reply (authoritative)", retries=30)
+    # ...and the queued message must still be visible right after it.
+    await user.should_see("second turn")
+
+
+async def test_load_earlier_disabled_while_turn_streaming(
+    user: User, context: PluginContext, hermes, fake_hermes_cli
+) -> None:
+    """"Load earlier" must not run concurrently with a live turn's own
+    rendering -- see the history/live split in ui.py -- so it's disabled for
+    the duration of a streaming turn and re-enabled once it ends."""
+    con = sqlite3.connect(fake_hermes_cli._state_db_path())
+    con.executemany(
+        "INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+        [(i, "sess-1", "user", f"filler message {i}", 1786620000.0 + i) for i in range(4, 105)],
+    )
+    con.commit()
+    con.close()
+    hermes.stream_delay = 0.3
+
+    web.build(context, [SessionsPlugin(context)])
+    await user.open("/sessions/sess-1")
+    await user.should_see("filler message 104")
+
+    user.find(marker="chat-input").type("long turn")
+    user.find(marker="chat-send").click()
+    await asyncio.sleep(0.05)  # into the streaming turn
+
+    button = next(iter(user.find(marker="load-earlier-button").elements))
+    assert button.enabled is False
+
+    user.find(marker="load-earlier-button").click()
+    await asyncio.sleep(0.1)
+    await user.should_not_see("How do I access your API?")  # click was a no-op
+
+    for _ in range(30):
+        if button.enabled:
+            break
+        await asyncio.sleep(0.1)
+    assert button.enabled is True
+
+    user.find(marker="load-earlier-button").click()
+    await user.should_see("How do I access your API?")
+
+
+async def test_tool_started_does_not_rebuild_history(
+    user: User, context: PluginContext, hermes
+) -> None:
+    """A structural event on the live turn (a new tool call starting) must
+    not tear down and rebuild the static historical prefix -- only the live
+    region grows. Regression test for the O(history length) rebuild that
+    `_render_history`/`_render_live` replaced `_render_transcript` with:
+    counts actual `ui.timeline()` constructions rather than comparing
+    element ids across time, since NiceGUI's own testing `ElementFilter`
+    can transiently surface a just-deleted element's id alongside its
+    replacement, which makes identity comparison across an `await` an
+    unreliable signal even when nothing was actually rebuilt."""
+    hermes.stream_delay = 0.2
+    hermes.stream_events = [
+        ("run.started", {"run_id": "run_cheap"}),
+        ("message.started", {"message": {"id": 20, "role": "assistant"}}),
+        ("tool.started", {"message_id": 20, "tool_name": "terminal", "args": '{"command": "ls"}'}),
+        ("tool.completed", {"message_id": 20, "tool_name": "terminal"}),
+        ("assistant.completed", {"message_id": 20, "content": "Done"}),
+        ("run.completed", {"completed": True, "usage": {}}),
+        ("done", {}),
+    ]
+    construct_count = 0
+    original_init = ui.timeline.__init__
+
+    def counting_init(self: ui.timeline, *args: object, **kwargs: object) -> None:
+        nonlocal construct_count
+        construct_count += 1
+        original_init(self, *args, **kwargs)
+
+    with patch.object(ui.timeline, "__init__", counting_init):
+        web.build(context, [SessionsPlugin(context)])
+        await user.open("/sessions/sess-1")
+        await user.should_see("How do I access your API?")
+        assert construct_count == 1  # initial historical render
+
+        user.find(marker="chat-input").type("watch history")
+        user.find(marker="chat-send").click()
+        for _ in range(30):
+            if construct_count >= 2:
+                break
+            await asyncio.sleep(0.05)
+        assert construct_count == 2  # turn start: one more historical render
+
+        await user.should_see(marker="live-tool", retries=20)
+        assert construct_count == 2, (
+            "tool.started is a live-region event -- it must not reconstruct "
+            "the history timeline"
+        )
 
 
 async def test_send_message_refreshes_message_count(user: User, context: PluginContext) -> None:
