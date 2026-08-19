@@ -1239,12 +1239,39 @@ def register_pages(plugin: Plugin) -> None:
                                 # Adopt the daemon's id for the pending message
                                 # (only when it's a real id, not a placeholder
                                 # string) so the handle dict and any later
-                                # reconcile stay keyed consistently.
+                                # reconcile stay keyed consistently. A *second*
+                                # `message.started` within the same run means a
+                                # genuinely new assistant message started (a
+                                # multi-step tool loop -- reason, call a tool,
+                                # reason again, call another, only then reply
+                                # -- produces one message per step server-side,
+                                # confirmed against a real `run.completed`
+                                # transcript), not a rename of the one already
+                                # streaming: finalize `pending` in place and
+                                # start accumulating into a fresh message, so
+                                # each step's own reasoning/content stays its
+                                # own string instead of every step's text
+                                # getting concatenated with no separator
+                                # (confirmed live: a two-step turn rendered its
+                                # first reply glued directly onto its final
+                                # one, `"...memory.Got it — ..."`).
                                 message = event.data.get("message")
                                 mid = message.get("id") if isinstance(message, dict) else None
                                 if isinstance(mid, int) and mid != pending.id:
-                                    turn_local_ids.discard(pending.id)
-                                    pending.id = mid
+                                    if pending.id > 0:
+                                        tool_calls = []
+                                        pending = Message(
+                                            id=mid,
+                                            session_id=session_id,
+                                            role="assistant",
+                                            content="",
+                                            tool_calls=tool_calls,
+                                            timestamp=datetime.now().timestamp(),
+                                        )
+                                        loaded_messages.append(pending)
+                                    else:
+                                        turn_local_ids.discard(pending.id)
+                                        pending.id = mid
                                     turn_local_ids.add(pending.id)
                                     active_message_id = pending.id
                                     handles = _render_live()
