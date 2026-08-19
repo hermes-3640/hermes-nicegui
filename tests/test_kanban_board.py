@@ -13,6 +13,7 @@ from hermes_nicegui import web
 from hermes_nicegui.plugin import PluginContext
 from hermes_nicegui.plugins.kanban import KanbanPlugin
 from hermes_nicegui.plugins.kanban.gateway import KanbanClient
+from hermes_nicegui.plugins.kanban.logic import CANONICAL_COLUMNS
 from tests.conftest import FakeHermesCli, FakeKanban
 
 
@@ -373,3 +374,71 @@ async def test_create_task_empty_body_non_triage_warns(
     await asyncio.sleep(0.2)
 
     assert not fake_hermes_cli.kanban_actions, "auto-specify ran for a non-triage task"
+
+
+async def test_same_priority_tasks_sorted_by_created_at(
+    user: User, context: PluginContext, kanban_client: KanbanClient, fake_kanban: FakeKanban
+) -> None:
+    """Tasks sharing a priority level are ordered by created_at ascending
+    (oldest first) — the secondary sort after priority DESC."""
+    # Insert two tasks at the same priority (2) with different created_at,
+    # plus the default t_1 fixture (priority 2, created_at 1786620000).
+    # Reverse-insert order: newest first, oldest last, so the DB has them
+    # out of date order — the SQL sort must reorder them.
+    fake_kanban.insert_task(
+        {
+            "id": "t_newest",
+            "title": "Newest priority-2 task",
+            "body": "",
+            "assignee": "default",
+            "status": "ready",
+            "priority": 2,
+            "tenant": None,
+            "created_at": 1786620050,  # newer than t_1
+            "started_at": None,
+            "completed_at": None,
+            "consecutive_failures": 0,
+            "last_failure_error": None,
+            "current_run_id": None,
+            "session_id": None,
+        }
+    )
+    fake_kanban.insert_task(
+        {
+            "id": "t_oldest",
+            "title": "Oldest priority-2 task",
+            "body": "",
+            "assignee": "default",
+            "status": "ready",
+            "priority": 2,
+            "tenant": None,
+            "created_at": 1786610000,  # older than t_1
+            "started_at": None,
+            "completed_at": None,
+            "consecutive_failures": 0,
+            "last_failure_error": None,
+            "current_run_id": None,
+            "session_id": None,
+        }
+    )
+    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    await user.open("/kanban")
+    # Wait for the board to load
+    await user.should_see("Fix flaky test", retries=10)
+
+    # Verify through the store layer (SQLite sort order) rather than
+    # NiceGUI element traversal, which depends on rendering internals.
+    store = web.current_store()
+    tasks, _total = await store.kanban.list_tasks(
+        status=None,
+        limit=50,
+        offset=0,
+        status_order=CANONICAL_COLUMNS,
+    )
+    # Filter to just the three priority-2 ready tasks
+    p2_ready = [t for t in tasks if t.priority == 2 and t.status == "ready"]
+    ids = [t.id for t in p2_ready]
+    # Oldest first, then t_1 (middle), then newest last
+    assert ids == ["t_oldest", "t_1", "t_newest"], (
+        f"Expected oldest-first date sort within priority, got order: {ids}"
+    )
