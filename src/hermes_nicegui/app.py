@@ -36,6 +36,10 @@ async def _bootstrap(settings: Settings) -> None:
         ssh_target=settings.ssh_target,
         ssh_options=settings.ssh_options_list,
         hermes_home=settings.hermes_home,
+        remote_python_bin=settings.ssh_python_bin,
+        dashboard_url=settings.kanban_url,
+        dashboard_username=settings.kanban_username,
+        dashboard_password=settings.kanban_password,
     )
     try:
         profiles = await executor.list_profile_names()

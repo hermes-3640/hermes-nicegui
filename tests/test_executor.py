@@ -56,6 +56,29 @@ def test_run_never_requests_tty(monkeypatch) -> None:
     assert "-tt" not in seen[0]
 
 
+def test_remote_io_argv_defaults_to_bare_python3() -> None:
+    executor = HermesExecutor(mode="ssh", hermes_bin="hermes", ssh_target="hermes@host")
+    assert executor._remote_io_argv() == ["ssh", "hermes@host", "python3", "-"]
+
+
+def test_remote_io_argv_honors_configured_python_bin() -> None:
+    """Some hosts' non-interactive PATH has no bare `python3` at all
+    (confirmed against a real NixOS host, `hermes.lan`) -- `remote_python_bin`
+    lets the read path point at an absolute interpreter path instead."""
+    executor = HermesExecutor(
+        mode="ssh",
+        hermes_bin="hermes",
+        ssh_target="hermes@host",
+        remote_python_bin="/nix/store/xyz-hermes-agent-env/bin/python3",
+    )
+    assert executor._remote_io_argv() == [
+        "ssh",
+        "hermes@host",
+        "/nix/store/xyz-hermes-agent-env/bin/python3",
+        "-",
+    ]
+
+
 # -- read primitives (state.db/cron/jobs.json/profiles, local mode) ---------
 #
 # Local-mode reads open a real file directly -- no fake subprocess boundary
@@ -129,6 +152,31 @@ async def test_read_sqlite_scoped_to_profile(tmp_path) -> None:
     assert await executor.read_sqlite("state.db", "SELECT * FROM sessions", profile="ha") == [
         {"id": "ha-sess"}
     ]
+
+
+async def test_read_sqlite_abs_reads_a_path_outside_hermes_home(tmp_path) -> None:
+    """Unlike `read_sqlite`, `read_sqlite_abs` isn't joined onto
+    `profile_home` -- it's for another tool's own database (e.g. OpenCode's)
+    that happens to live on the same host but outside any Hermes profile
+    dir."""
+    other_dir = tmp_path / "elsewhere"
+    other_dir.mkdir()
+    db_path = other_dir / "opencode-stable.db"
+    con = sqlite3.connect(db_path)
+    con.execute("CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT)")
+    con.execute("INSERT INTO session (id, title) VALUES ('ses-1', 'a session')")
+    con.commit()
+    con.close()
+
+    executor = HermesExecutor(hermes_home=str(tmp_path / "hermes-home"))
+    rows = await executor.read_sqlite_abs(str(db_path), "SELECT * FROM session")
+    assert rows == [{"id": "ses-1", "title": "a session"}]
+
+
+async def test_read_sqlite_abs_missing_file_returns_empty(tmp_path) -> None:
+    executor = HermesExecutor(hermes_home=str(tmp_path))
+    missing = tmp_path / "nowhere" / "opencode.db"
+    assert await executor.read_sqlite_abs(str(missing), "SELECT * FROM session") == []
     assert await executor.read_sqlite("state.db", "SELECT * FROM sessions") == []
 
 

@@ -15,19 +15,19 @@ total reflects the filtered set.
 Mirrors ``plugins/cron/ui.py``'s shape (closures per mutation, wrapped in
 ``background_tasks.create`` so they can be awaited from a synchronous
 ``on_click``, patch the already-rendered UI in place via an ``on_updated``
-callback), with one difference: reads (`list_tasks`/task detail) go through
-``web.current_store().kanban`` (direct SQLite against `kanban.db`), while
-every mutation still goes through ``client`` (``KanbanClient``, the
-dashboard's cookie-auth REST API) -- kanban's CLI (`hermes kanban ...`) is a
-task-lifecycle tool with no generic field-setter, unlike cron's, so its
-writes couldn't move the way cron's did. The one thing worth calling out:
-the dashboard's ``POST /tasks``
-always creates a task in the ``ready`` column, which the live dispatcher
-picks up within ~60s and spawns a real agent run for -- there's no
-``status`` field on create. The "New task" dialog defaults its own status
-picker to the safer ``triage`` (parked, needs an explicit move) rather than
-matching that server-side default, and issues a follow-up PATCH via
-``KanbanClient.create_task``'s ``status=`` kwarg when the two differ.
+callback): both reads (`list_tasks`/task detail) and writes go through
+``web.current_store().kanban`` -- reads are direct SQLite against
+`kanban.db`, writes delegate to `HermesExecutor`'s dashboard-REST methods
+(kanban's CLI has no generic field-setter, unlike cron's, so its writes
+couldn't move the way cron's did -- see `HermesExecutor`'s "kanban writes"
+section), but the plugin itself only ever talks to the one store. The one
+thing worth calling out: the dashboard's ``POST /tasks`` always creates a
+task in the ``ready`` column, which the live dispatcher picks up within ~60s
+and spawns a real agent run for -- there's no ``status`` field on create.
+The "New task" dialog defaults its own status picker to the safer
+``triage`` (parked, needs an explicit move) rather than matching that
+server-side default, and issues a follow-up PATCH via
+``KanbanStore.create``'s ``status=`` kwarg when the two differ.
 
 One more create-time behavior: a task created with an **empty description**
 is auto-specified in the background — the UI runs ``hermes kanban specify``
@@ -49,10 +49,9 @@ from typing import Any, cast
 from nicegui import background_tasks, ui
 
 from hermes_nicegui import web
-from hermes_nicegui.gateway import HermesError
+from hermes_nicegui.gateway import Comment, HermesError, Task
 from hermes_nicegui.pagination import Pager, render_pager
 from hermes_nicegui.plugin import Plugin
-from hermes_nicegui.plugins.kanban.gateway import Comment, KanbanError, Task
 from hermes_nicegui.plugins.kanban.logic import (
     CANONICAL_COLUMNS,
     STAGE_HELP,
@@ -79,7 +78,6 @@ _RUNNING_ICON_CSS = """
 
 
 def register_pages(plugin: Plugin) -> None:
-    client = plugin.kanban_client  # type: ignore[attr-defined]
     logger = plugin.logger
     executor = plugin.context.executor
 
@@ -159,14 +157,14 @@ def register_pages(plugin: Plugin) -> None:
                     return
                 body_text = (body.value or "").strip()
                 try:
-                    task = await client.create_task(
+                    task = await web.current_store().kanban.create(
                         title=new_title,
                         body=body.value or "",
                         assignee=(assignee.value or "default").strip() or "default",
                         priority=int(priority.value) if priority.value is not None else 2,
                         status=status.value,
                     )
-                except KanbanError as exc:
+                except HermesError as exc:
                     ui.notify(f"Create failed: {exc}", type="negative")
                     return
                 dialog.close()
@@ -339,8 +337,8 @@ def register_pages(plugin: Plugin) -> None:
     def _move_status(task_id: str, new_status: str, on_updated: Any) -> None:
         async def do_move() -> None:
             try:
-                updated = await client.update_task(task_id, {"status": new_status})
-            except KanbanError as exc:
+                updated = await web.current_store().kanban.move_status(task_id, new_status)
+            except HermesError as exc:
                 ui.notify(f"Move failed: {exc}", type="negative")
                 return
             ui.notify(f"Moved to {column_meta(new_status)[0]}", type="positive")
@@ -351,8 +349,8 @@ def register_pages(plugin: Plugin) -> None:
     def _delete_task(task_id: str, on_deleted: Any) -> None:
         async def do_delete() -> None:
             try:
-                await client.delete_task(task_id)
-            except KanbanError as exc:
+                await web.current_store().kanban.delete(task_id)
+            except HermesError as exc:
                 ui.notify(f"Delete failed: {exc}", type="negative")
                 return
             ui.notify("Task deleted", type="positive")
@@ -363,8 +361,8 @@ def register_pages(plugin: Plugin) -> None:
     def _save_fields(task_id: str, fields: dict[str, Any], on_updated: Any) -> None:
         async def do_save() -> None:
             try:
-                updated = await client.update_task(task_id, fields)
-            except KanbanError as exc:
+                updated = await web.current_store().kanban.save_fields(task_id, fields)
+            except HermesError as exc:
                 ui.notify(f"Save failed: {exc}", type="negative")
                 return
             ui.notify("Task saved", type="positive")
@@ -378,8 +376,8 @@ def register_pages(plugin: Plugin) -> None:
                 ui.notify("Comment can't be empty", type="warning")
                 return
             try:
-                await client.add_comment(task_id, body)
-            except KanbanError as exc:
+                await web.current_store().kanban.add_comment(task_id, body)
+            except HermesError as exc:
                 ui.notify(f"Comment failed: {exc}", type="negative")
                 return
             on_added()

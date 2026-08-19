@@ -27,7 +27,8 @@ class Settings(BaseSettings):
 
     # The kanban plugin talks to a *different* server than the gateway above:
     # the Hermes CLI's own dashboard web server, which uses cookie/password
-    # auth rather than a bearer token. See `plugins/kanban/gateway.py`.
+    # auth rather than a bearer token. See `HermesExecutor`'s kanban-writes
+    # methods.
     kanban_url: str = ""
     kanban_username: str = ""
     kanban_password: str = ""
@@ -50,6 +51,14 @@ class Settings(BaseSettings):
     cli_bin: str = "hermes"
     ssh_target: str = ""
     ssh_options: str = ""
+
+    # The interpreter `HermesExecutor`'s ssh read path (`read_sqlite`/
+    # `read_json`/...) runs on the remote host. Bare `python3` works on most
+    # hosts, but not all -- e.g. a NixOS host's non-interactive PATH may have
+    # no `python3` at all (only `hermes` itself, via a wrapper bundling its
+    # own interpreter); point this at an absolute path in that case (see
+    # `HermesExecutor`'s "kanban writes"-adjacent read-path docs).
+    ssh_python_bin: str = "python3"
 
     # Where the daemon keeps its data (state.db, cron/jobs.json, kanban.db,
     # profiles/<name>/...) -- read directly (see `HermesExecutor.read_sqlite`/

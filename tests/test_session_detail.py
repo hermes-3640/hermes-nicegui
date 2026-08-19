@@ -191,6 +191,37 @@ async def test_live_tool_cleanup_ignores_detached_spinner(
     _delete_if_attached(live_tool.spinner)
 
 
+async def test_compressed_messages_get_a_boundary_marker(
+    user: User, context: PluginContext
+) -> None:
+    """A run of ``compacted`` messages followed by a live one gets a
+    "Context compressed" divider ahead of the live message -- the visible
+    trace of the daemon's in-place context compaction (``state.db``'s
+    ``messages.compacted``), which otherwise leaves no visual cue that older
+    turns were archived and summarized away."""
+    web.build(context, [SessionsPlugin(context)])
+    await user.open("/sessions/sess-1")
+    await user.should_see("How do I access your API?")
+
+    messages = [
+        Message(
+            id=101, session_id="sess-1", role="user", content="archived turn one",
+            compacted=True,
+        ),
+        Message(
+            id=102, session_id="sess-1", role="assistant", content="archived reply",
+            compacted=True,
+        ),
+        Message(
+            id=103, session_id="sess-1", role="user", content="summary handoff",
+        ),
+    ]
+    timeline = next(iter(user.find(kind=ui.timeline).elements))
+    with timeline:
+        render_transcript_events(messages)
+    await user.should_see("Context compressed — 2 earlier messages archived")
+
+
 async def test_no_thinking_spinner_during_turn(user: User, context: PluginContext, hermes) -> None:
     """The per-turn "Thinking…" status row is gone: while a turn streams
     (reasoning delta in flight), that exact label never appears on the page."""

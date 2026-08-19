@@ -12,32 +12,31 @@ from nicegui.testing import User
 from hermes_nicegui import web
 from hermes_nicegui.plugin import PluginContext
 from hermes_nicegui.plugins.kanban import KanbanPlugin
-from hermes_nicegui.plugins.kanban.gateway import KanbanClient
 from tests.conftest import FakeHermesCli, FakeKanban
 
 
 async def test_kanban_board_renders(
-    user: User, context: PluginContext, kanban_client: KanbanClient
+    user: User, kanban_context: PluginContext
 ) -> None:
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open("/kanban")
     await user.should_see("Fix flaky test")
     assert user.find(marker="new-task-button").elements
 
 
 async def test_kanban_nav_item_present(
-    user: User, context: PluginContext, kanban_client: KanbanClient
+    user: User, kanban_context: PluginContext
 ) -> None:
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open("/")
     await user.should_see("Kanban")
 
 
 async def test_task_cards_are_clickable(
-    user: User, context: PluginContext, kanban_client: KanbanClient
+    user: User, kanban_context: PluginContext
 ) -> None:
     """Cards must carry Quasar's `clickable` prop for real-browser clicks."""
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open("/kanban")
     await user.should_see("Fix flaky test")
     for item in user.find(marker="task-card").elements:
@@ -45,9 +44,9 @@ async def test_task_cards_are_clickable(
 
 
 async def test_click_card_navigates_to_detail(
-    user: User, context: PluginContext, kanban_client: KanbanClient
+    user: User, kanban_context: PluginContext
 ) -> None:
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open("/kanban")
     await user.should_see("Fix flaky test")
     user.find(marker="task-card").click()
@@ -55,10 +54,10 @@ async def test_click_card_navigates_to_detail(
 
 
 async def test_filter_tab_hides_tasks_in_other_status(
-    user: User, context: PluginContext, kanban_client: KanbanClient
+    user: User, kanban_context: PluginContext
 ) -> None:
     """``t_1`` is ``ready``; switching to the ``done`` filter should hide it."""
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open("/kanban")
     await user.should_see("Fix flaky test")
 
@@ -70,12 +69,12 @@ async def test_filter_tab_hides_tasks_in_other_status(
 
 
 async def test_filter_tabs_order_review_before_blocked(
-    user: User, context: PluginContext, kanban_client: KanbanClient
+    user: User, kanban_context: PluginContext
 ) -> None:
     """The status filter tabs must render in canonical order -- ``review``
     before ``blocked`` (ticket: "review should be before blocked in kanban
     views")."""
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open("/kanban")
     await user.should_see("Fix flaky test")
 
@@ -85,9 +84,9 @@ async def test_filter_tabs_order_review_before_blocked(
 
 
 async def test_stage_help_expansion_lists_canonical_columns(
-    user: User, context: PluginContext, kanban_client: KanbanClient
+    user: User, kanban_context: PluginContext
 ) -> None:
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open("/kanban")
 
     expansion = cast(ui.expansion, next(iter(user.find(marker="stage-help-expansion").elements)))
@@ -107,9 +106,9 @@ async def test_stage_help_expansion_lists_canonical_columns(
 
 
 async def test_create_task_dialog_adds_card(
-    user: User, context: PluginContext, kanban_client: KanbanClient
+    user: User, kanban_context: PluginContext
 ) -> None:
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open("/kanban")
     await user.should_see("Fix flaky test")
 
@@ -122,7 +121,7 @@ async def test_create_task_dialog_adds_card(
 
 
 async def test_board_paginates_with_numbered_pages(
-    user: User, context: PluginContext, kanban_client: KanbanClient, fake_kanban
+    user: User, kanban_context: PluginContext, fake_kanban
 ) -> None:
     for i in range(35):
         fake_kanban.insert_task(
@@ -143,7 +142,7 @@ async def test_board_paginates_with_numbered_pages(
                 "session_id": None,
             }
         )
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open("/kanban")
     await user.should_see("Fix flaky test")
     assert len(user.find(marker="task-card").elements) == 30
@@ -156,7 +155,7 @@ async def test_board_paginates_with_numbered_pages(
 
 
 async def test_running_task_icon_is_animated(
-    user: User, context: PluginContext, kanban_client: KanbanClient, fake_kanban: FakeKanban
+    user: User, kanban_context: PluginContext, fake_kanban: FakeKanban
 ) -> None:
     fake_kanban.insert_task(
         {
@@ -176,7 +175,7 @@ async def test_running_task_icon_is_animated(
             "session_id": None,
         }
     )
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open("/kanban")
 
     icons = user.find(marker="task-status-icon").elements
@@ -188,8 +187,7 @@ async def test_running_task_icon_is_animated(
 
 async def test_search_filters_board(
     user: User,
-    context: PluginContext,
-    kanban_client: KanbanClient,
+    kanban_context: PluginContext,
     fake_kanban: FakeKanban,
 ) -> None:
     """Typing into the kanban-search box narrows the board to matching tasks
@@ -213,7 +211,7 @@ async def test_search_filters_board(
             "session_id": None,
         }
     )
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open("/kanban")
     await user.should_see("Fix flaky test")
     await user.should_see("Clean up backlog")
@@ -233,8 +231,7 @@ async def test_search_filters_board(
 
 async def test_search_combines_with_status_tab(
     user: User,
-    context: PluginContext,
-    kanban_client: KanbanClient,
+    kanban_context: PluginContext,
     fake_kanban: FakeKanban,
 ) -> None:
     """Search and the status tabs combine: a query whose only match is a
@@ -257,7 +254,7 @@ async def test_search_combines_with_status_tab(
             "session_id": None,
         }
     )
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open("/kanban")
     await user.should_see("Fix flaky test")
 
@@ -291,8 +288,7 @@ def _task_row(db_path: str, task_id: str) -> tuple[str, str]:
 
 async def test_create_task_empty_body_triggers_auto_specify(
     user: User,
-    context: PluginContext,
-    kanban_client: KanbanClient,
+    kanban_context: PluginContext,
     fake_hermes_cli: FakeHermesCli,
     fake_kanban: FakeKanban,
 ) -> None:
@@ -300,7 +296,7 @@ async def test_create_task_empty_body_triggers_auto_specify(
     status gets auto-specified in the background: the UI shells out to
     `hermes kanban specify <id> --json` and the task lands with a fleshed-out
     body, promoted triage -> todo."""
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open("/kanban")
     await user.should_see("Fix flaky test")
 
@@ -327,13 +323,12 @@ async def test_create_task_empty_body_triggers_auto_specify(
 
 async def test_create_task_with_body_skips_auto_specify(
     user: User,
-    context: PluginContext,
-    kanban_client: KanbanClient,
+    kanban_context: PluginContext,
     fake_hermes_cli: FakeHermesCli,
 ) -> None:
     """A task created with a real description must NOT be auto-specified —
     the specifier is only for cards that arrive with an empty body."""
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open("/kanban")
     await user.should_see("Fix flaky test")
 
@@ -350,14 +345,13 @@ async def test_create_task_with_body_skips_auto_specify(
 
 async def test_create_task_empty_body_non_triage_warns(
     user: User,
-    context: PluginContext,
-    kanban_client: KanbanClient,
+    kanban_context: PluginContext,
     fake_hermes_cli: FakeHermesCli,
 ) -> None:
     """An empty-body task created at a non-Triage status can't use the
     triage specifier (it refuses), so no specify call is made — the dialog
     warns instead."""
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open("/kanban")
     await user.should_see("Fix flaky test")
 

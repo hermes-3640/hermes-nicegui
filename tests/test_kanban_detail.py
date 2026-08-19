@@ -10,32 +10,31 @@ from nicegui.testing import User
 from hermes_nicegui import web
 from hermes_nicegui.plugin import PluginContext
 from hermes_nicegui.plugins.kanban import KanbanPlugin
-from hermes_nicegui.plugins.kanban.gateway import KanbanClient
 from hermes_nicegui.plugins.sessions import SessionsPlugin
 
 TASK_ID = "t_1"
 
 
 async def test_detail_page_loads_directly(
-    user: User, context: PluginContext, kanban_client: KanbanClient
+    user: User, kanban_context: PluginContext
 ) -> None:
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open(f"/kanban/{TASK_ID}")
     await user.should_see("Fix flaky test")
 
 
 async def test_detail_page_shows_comments(
-    user: User, context: PluginContext, kanban_client: KanbanClient
+    user: User, kanban_context: PluginContext
 ) -> None:
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open(f"/kanban/{TASK_ID}")
     await user.should_see("Looking into it")
 
 
 async def test_body_renders_as_markdown(
-    user: User, context: PluginContext, kanban_client: KanbanClient
+    user: User, kanban_context: PluginContext
 ) -> None:
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open(f"/kanban/{TASK_ID}")
 
     elements = list(user.find(marker="task-body-rendered").elements)
@@ -46,9 +45,9 @@ async def test_body_renders_as_markdown(
 
 
 async def test_comments_render_as_markdown(
-    user: User, context: PluginContext, kanban_client: KanbanClient
+    user: User, kanban_context: PluginContext
 ) -> None:
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open(f"/kanban/{TASK_ID}")
 
     elements = list(user.find(marker="comment-body").elements)
@@ -57,18 +56,18 @@ async def test_comments_render_as_markdown(
 
 
 async def test_detail_page_has_actions(
-    user: User, context: PluginContext, kanban_client: KanbanClient
+    user: User, kanban_context: PluginContext
 ) -> None:
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open(f"/kanban/{TASK_ID}")
     assert user.find(marker="move-status-select").elements
     assert user.find(marker="delete-task-button").elements
 
 
 async def test_move_status_updates_badge(
-    user: User, context: PluginContext, kanban_client: KanbanClient
+    user: User, kanban_context: PluginContext
 ) -> None:
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open(f"/kanban/{TASK_ID}")
     await user.should_see("Fix flaky test")
 
@@ -79,9 +78,9 @@ async def test_move_status_updates_badge(
 
 
 async def test_add_comment_appends_to_list(
-    user: User, context: PluginContext, kanban_client: KanbanClient
+    user: User, kanban_context: PluginContext
 ) -> None:
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open(f"/kanban/{TASK_ID}")
     await user.should_see("Looking into it")
 
@@ -93,8 +92,7 @@ async def test_add_comment_appends_to_list(
 
 async def test_delete_navigates_to_origin_session(
     user: User,
-    context: PluginContext,
-    kanban_client: KanbanClient,
+    kanban_context: PluginContext,
     hermes_home,
 ) -> None:
     """Deleting a task lands back on the task's session page -- the origin
@@ -117,10 +115,10 @@ async def test_delete_navigates_to_origin_session(
     con.close()
 
     web.build(
-        context,
+        kanban_context,
         [
-            KanbanPlugin(context, kanban_client=kanban_client),
-            SessionsPlugin(context),
+            KanbanPlugin(kanban_context),
+            SessionsPlugin(kanban_context),
         ],
     )
     await user.open(f"/kanban/{TASK_ID}")
@@ -131,8 +129,7 @@ async def test_delete_navigates_to_origin_session(
 
 async def test_delete_without_session_falls_back_to_board(
     user: User,
-    context: PluginContext,
-    kanban_client: KanbanClient,
+    kanban_context: PluginContext,
     fake_kanban,
 ) -> None:
     """A task with no `session_id` (CLI/dashboard-created) still falls back to
@@ -176,7 +173,7 @@ async def test_delete_without_session_falls_back_to_board(
         }
     )
 
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open("/kanban/t_nosess")
     await user.should_see("No-session task")
     user.find(marker="delete-task-button").click()
@@ -185,9 +182,9 @@ async def test_delete_without_session_falls_back_to_board(
 
 
 async def test_view_session_button_shown_when_task_has_session(
-    user: User, context: PluginContext, kanban_client: KanbanClient
+    user: User, kanban_context: PluginContext
 ) -> None:
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open(f"/kanban/{TASK_ID}")
     await user.should_see("Fix flaky test")
     assert user.find(marker="view-session-button").elements
@@ -195,8 +192,7 @@ async def test_view_session_button_shown_when_task_has_session(
 
 async def test_view_session_links_to_worker_session_not_spawning(
     user: User,
-    context: PluginContext,
-    kanban_client: KanbanClient,
+    kanban_context: PluginContext,
     hermes_home,
 ) -> None:
     """The fixture task's row records `sess-99` (the spawning session) but a
@@ -219,7 +215,7 @@ async def test_view_session_links_to_worker_session_not_spawning(
     con.commit()
     con.close()
 
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open(f"/kanban/{TASK_ID}")
     await user.should_see("Fix flaky test")
     # Primary button targets the worker session; the spawning session is the
@@ -230,8 +226,7 @@ async def test_view_session_links_to_worker_session_not_spawning(
 
 async def test_no_origin_button_without_spawning_session(
     user: User,
-    context: PluginContext,
-    kanban_client: KanbanClient,
+    kanban_context: PluginContext,
     fake_kanban,
     hermes_home,
 ) -> None:
@@ -272,7 +267,7 @@ async def test_no_origin_button_without_spawning_session(
     con.commit()
     con.close()
 
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open("/kanban/t_cli")
     await user.should_see("CLI-created task")
     assert user.find(marker="view-session-button").elements
@@ -281,8 +276,7 @@ async def test_no_origin_button_without_spawning_session(
 
 async def test_body_preview_hidden_when_empty(
     user: User,
-    context: PluginContext,
-    kanban_client: KanbanClient,
+    kanban_context: PluginContext,
     fake_kanban,
 ) -> None:
     fake_kanban.insert_task(
@@ -305,24 +299,24 @@ async def test_body_preview_hidden_when_empty(
         }
     )
 
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open("/kanban/t_empty")
     await user.should_not_see(marker="task-body-rendered")
 
 
 async def test_runs_section_shows_run_status(
-    user: User, context: PluginContext, kanban_client: KanbanClient
+    user: User, kanban_context: PluginContext
 ) -> None:
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open(f"/kanban/{TASK_ID}")
     await user.should_see("Runs (1)")
     await user.should_see("completed")
 
 
 async def test_save_fields_updates_title(
-    user: User, context: PluginContext, kanban_client: KanbanClient
+    user: User, kanban_context: PluginContext
 ) -> None:
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open(f"/kanban/{TASK_ID}")
     await user.should_see("Fix flaky test")
 
@@ -335,9 +329,9 @@ async def test_save_fields_updates_title(
 
 
 async def test_body_preview_updates_after_save(
-    user: User, context: PluginContext, kanban_client: KanbanClient
+    user: User, kanban_context: PluginContext
 ) -> None:
-    web.build(context, [KanbanPlugin(context, kanban_client=kanban_client)])
+    web.build(kanban_context, [KanbanPlugin(kanban_context)])
     await user.open(f"/kanban/{TASK_ID}")
 
     body_input = user.find(marker="task-body-input")

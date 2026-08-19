@@ -574,6 +574,14 @@ def render_transcript_events(
     streaming: each gets a small "Queued -- will send after this turn
     completes" row under its bubble, dropped once the id is no longer in the
     set (i.e. once that turn actually starts).
+
+    ``msg.compacted`` (soft-archived by the daemon's in-place context
+    compaction, ``state.db``'s ``messages.compacted``) still renders like any
+    other historical message -- compaction preserves them on disk precisely
+    so nothing vanishes from view -- but the first non-compacted message
+    following a run of them gets a "Context compressed" divider row ahead of
+    it, so the transcript shows *where* the daemon summarized old turns away
+    instead of the boundary being invisible.
     """
     results_by_call_id = {
         m.tool_call_id: m for m in messages if m.role == "tool" and m.tool_call_id
@@ -590,8 +598,19 @@ def render_transcript_events(
         )
     statuses = tool_status or {}
     handles: dict[int, LiveEntry] = {}
+    archived_run = 0
 
     for msg in messages:
+        if archived_run and not msg.compacted:
+            _step(
+                "compress",
+                "purple",
+                f"Context compressed — {archived_run} earlier "
+                f"message{'s' if archived_run != 1 else ''} archived",
+                msg.timestamp,
+            )
+        archived_run = archived_run + 1 if msg.compacted else 0
+
         is_active = active_id is not None and msg.id == active_id
         if msg.role == "user":
             _chat_bubble(
