@@ -428,7 +428,7 @@ def _kanban_where(search: str | None) -> str:
 
 def _kanban_list_sql(status_order: list[str] | None = None, search: str | None = None) -> str:
     if status_order is None:
-        order_by = "t.priority DESC, t.created_at ASC"
+        order_by = "t.created_at DESC"
     else:
         for status in status_order:
             if not _KANBAN_STATUS_RE.fullmatch(status):
@@ -436,7 +436,7 @@ def _kanban_list_sql(status_order: list[str] | None = None, search: str | None =
         cases = " ".join(
             f"WHEN t.status = '{status}' THEN {index}" for index, status in enumerate(status_order)
         )
-        order_by = f"CASE {cases} ELSE {len(status_order)} END, t.priority DESC, t.created_at ASC"
+        order_by = f"CASE {cases} ELSE {len(status_order)} END, t.created_at DESC"
     return f"""
 SELECT {_KANBAN_TASK_COLUMNS} FROM tasks t
 WHERE (:status IS NULL OR t.status = :status)
@@ -505,7 +505,7 @@ class KanbanStore:
         re-filtering client-side, so a status tab's own page count reflects
         only tasks in that status. When `status_order` is provided, status
         groups are ordered as given, unknown statuses come last, and each
-        group is ordered by priority descending then created_at ascending.
+        group is ordered by created_at descending (newest first).
 
         `search` narrows the same set further: a case-insensitive substring
         match against title, body, assignee, or task id (`%`/`_` in the input
