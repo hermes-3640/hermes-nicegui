@@ -840,7 +840,7 @@ def register_pages(plugin: Plugin) -> None:
 
             current_sessions: list[Session] = []
             total = 0
-            pager = Pager()
+            pager = Pager(limit=20)
 
             def render_preview_row(s: Session, *, unread: bool) -> None:
                 def on_deleted() -> None:
@@ -885,8 +885,14 @@ def register_pages(plugin: Plugin) -> None:
                         if unread:
                             ui.icon("circle", size="8px", color="primary")
                     with ui.item_section().props("side"):
-                        ui.button(icon="delete", color="negative", on_click=_confirm_delete).props(
+                        # `click.stop` (Vue's `.stop` modifier) keeps this
+                        # from also triggering the row's own `on_click`
+                        # navigation — same pattern as the files plugin.
+                        ui.button(icon="delete", color="negative").props(
                             "flat dense size=sm"
+                        ).on(
+                            "click.stop",
+                            _confirm_delete,
                         ).mark("delete-session-button").tooltip(f"Delete '{s.title or s.id}'")
 
             def render_rows() -> None:

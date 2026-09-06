@@ -163,11 +163,11 @@ async def test_list_paginates_with_numbered_pages(
     web.build(context, [SessionsPlugin(context)])
     await user.open("/sessions")
     await user.should_see("First session")
-    assert len(user.find(marker="session-row").elements) == 30
+    assert len(user.find(marker="session-row").elements) == 20
     pager = cast(ui.pagination, next(iter(user.find(marker="page-control").elements)))
     pager.set_value(2)
     await user.should_see("Extra session 35", retries=10)
-    assert len(user.find(marker="session-row").elements) == 12
+    assert len(user.find(marker="session-row").elements) == 20
     await user.should_not_see("First session", retries=10)
 
 

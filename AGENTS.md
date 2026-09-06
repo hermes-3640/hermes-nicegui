@@ -202,3 +202,122 @@ read `.env` or any environment variable — see Testing below.
   pattern the plain `terminal` plugin uses for a local shell), not a
   websocket/SSE bridge. Session detail (`/sessions/{id}`) is a read-only
   transcript with rename/delete/"Continue in chat".
+
+## Debugging
+
+### Running the app in a real browser
+
+Unit tests use NiceGUI's `user` fixture (browserless simulation). To debug
+UI issues you need a real browser:
+
+1. Set `HERMES_AUTH_ENABLED=false` in `.env` so you are not blocked by the
+   login page while developing.
+2. Set `HERMES_LOG_LEVEL=DEBUG` to get verbose Python-side logs (loguru).
+3. Run the app:
+
+   ```sh
+   HERMES_AUTH_ENABLED=false HERMES_LOG_LEVEL=DEBUG uv run hermes-nicegui
+   ```
+
+   In `app.py` the call is `ui.run(reload=settings.ui_reload, show=False)`.
+   During local development you can override the source to use `show=True` so
+   NiceGUI opens the browser automatically, or navigate manually to the
+   printed URL (default `http://127.0.0.1:8080`).
+
+4. With `HERMES_UI_RELOAD=true` (or the default `reload=True` in `ui.run()`),
+   NiceGUI runs in script mode with auto-reload: editing any `.py` file
+   restarts the server process automatically. You only need to refresh the
+   browser tab, not restart the app.
+
+#### Browser-side debugging
+
+- Open Chrome DevTools (`F12` / `Cmd+Option+I`) on the NiceGUI page.
+- The **Console** tab shows both Python-side `loguru` errors (if routed to
+  the browser console) and client-side JS issues.
+- Use the **Elements** tab to inspect the DOM -- NiceGUI renders standard
+  HTML elements (Quasar + Vue components).
+- The **Network** tab shows SSE streams (`/api/sessions/.../chat/stream`),
+  REST calls to the dashboard, and page loads.
+- Use `monitorEvents(selector)` in the console to watch events on specific
+  elements (e.g. click handlers on buttons).
+
+### E2E testing with a real browser (screen fixture)
+
+NiceGUI ships a `screen` fixture that launches a real headless browser via
+Selenium. This exercises the full stack -- server, WebSocket, client rendering
+-- unlike the `user` fixture which simulates the server side only.
+
+1. Install the browser and driver:
+
+   ```sh
+   # NiceGUI's conftest uses Selenium; install ChromeDriver to match your
+   # system Chrome/Chromium. NiceGUI's test helpers attempt this
+   # automatically on x86_64 and Apple Silicon.
+   # If it fails:
+   CHROME_BINARY_LOCATION=/usr/bin/chromium uv run pytest tests/your_test.py
+   ```
+
+2. Write a test using the `screen` fixture:
+
+   ```python
+   from nicegui.testing import Screen
+
+   def test_login_page_exists(screen: Screen, context: PluginContext):
+       web.build(context)  # register pages
+       screen.open("/login")
+       screen.should_contain("Admin Account")  # text on the page
+   ```
+
+3. Run the test -- `screen` launches a headless browser, navigates, and
+   asserts against the rendered DOM.
+
+Use `screen.selenium` to access the raw Selenium WebDriver for operations
+the high-level helpers don't cover (file uploads, JS execution, etc.).
+
+### Debugging live session/chat interactions
+
+Live chat runs `hermes chat` via a real pty (`PtySession` in
+`plugins/terminal/logic.py`). To debug:
+
+1. Start the app in a real browser (see above).
+2. Open the browser's DevTools Network tab -- you can see the WebSocket/SSE
+   stream frames.
+3. Add `print()` or `logger.debug()` calls inside
+   `plugins/sessions/logic.py` handlers and watch the terminal output.
+4. The `HERMES_LOG_LEVEL=DEBUG` environment variable boosts loguru output
+   across all plugins.
+
+### Debugging kanban plugin interactions
+
+The kanban plugin reads via `store.py` (direct SQLite) and writes via
+`KanbanClient` (dashboard REST API). To debug:
+
+1. Open the browser DevTools **Network** tab and filter by the kanban URL
+   (`HERMES_KANBAN_URL`, usually `http://127.0.0.1:9119`).
+2. All kanban writes go through `/api/plugins/kanban` endpoints -- watch
+   the requests/responses for failure details.
+3. Add breakpoints in `plugins/kanban/logic.py` and `plugins/kanban/ui.py`
+   -- the Python debugger can attach if you run the app with
+   `python -m pdb main.py` or use an IDE debugger.
+
+### Common debugging patterns
+
+- **Page not loading / blank page**: Check the terminal for Python tracebacks
+  (NiceGUI prints them at startup). Check the browser Console for JS errors.
+- **Data not showing**: Open the browser DevTools Application tab -> Cookies
+  to verify the NiceGUI session cookie is present (requires
+  `storage_secret` in `ui.run()`). Check the Network tab for failing API
+  calls.
+- **Slow page loads**: Profile in the Performance tab. Remember that SSH-mode
+  reads pay a real network round-trip -- use the
+  `await ui.context.client.connected()` guard to avoid blocking.
+- **Hot-reload not triggering**: NiceGUI auto-reload requires the script to
+  be called directly (not via an entry-point script like `uv run hermes-nicegui`
+  with certain configurations). The hermes-nicegui `main.py` guards correctly
+  with `if __name__ in {"__main__", "__mp_main__"}`. If reload doesn't work,
+  try `uv run python main.py` directly.
+- **Session storage issues**: NiceGUI's tab/client/user/general storage lives
+  in the `app.storage` namespace. Tab storage is per-tab and ephemeral; user
+  storage persists across tabs. General storage is shared across all users.
+  Check `app.storage.user` and `app.storage.client` in the browser console
+  if session state seems lost.
