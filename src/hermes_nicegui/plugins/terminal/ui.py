@@ -29,6 +29,13 @@ def register_pages(plugin: Plugin) -> None:
         with frame(active="/terminal"):
             ui.label("Local terminal").classes("text-lg")
 
+            ui.notify(
+                "Click on the terminal area to start typing.",
+                color="grey-7",
+                position="top",
+                timeout=5000,
+            )
+
             terminal = (
                 ui.xterm({"cursorBlink": True, "fontSize": 14})
                 .classes("w-full h-[70vh]")
