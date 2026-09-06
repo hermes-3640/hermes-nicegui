@@ -843,6 +843,29 @@ def register_pages(plugin: Plugin) -> None:
             pager = Pager()
 
             def render_preview_row(s: Session, *, unread: bool) -> None:
+                def on_deleted() -> None:
+                    """Refresh rows after successful delete."""
+                    render_rows()
+
+                def _confirm_delete() -> None:
+                    with ui.dialog() as dialog, ui.card().classes("w-full max-w-xs"):
+                        ui.label(f"Delete session '{s.title or s.id}'?").classes(
+                            "text-lg font-bold"
+                        )
+                        ui.label("This action cannot be undone.").classes("text-sm opacity-70")
+                        with ui.row().classes("w-full justify-end gap-2"):
+                            ui.button("Cancel", on_click=dialog.close).props("flat").mark(
+                                "cancel-delete-button"
+                            )
+                            ui.button(
+                                "Delete",
+                                icon="delete",
+                                color="negative",
+                                on_click=lambda: _delete(s.id, on_deleted) or dialog.close(),
+                            ).mark("confirm-delete-button")
+
+                    dialog.open()
+
                 with (
                     ui.item(on_click=partial(ui.navigate.to, f"/sessions/{s.id}"))
                     .props("v-ripple")
@@ -861,6 +884,10 @@ def register_pages(plugin: Plugin) -> None:
                         ui.label(fmt_age(s.last_active)).classes("text-xs opacity-60")
                         if unread:
                             ui.icon("circle", size="8px", color="primary")
+                    with ui.item_section().props("side"):
+                        ui.button(icon="delete", color="negative", on_click=_confirm_delete).props(
+                            "flat dense size=sm"
+                        ).mark("delete-session-button").tooltip(f"Delete '{s.title or s.id}'")
 
             def render_rows() -> None:
                 """Render the current page's already-fetched sessions.
