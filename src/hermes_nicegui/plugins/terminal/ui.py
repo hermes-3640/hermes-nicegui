@@ -29,6 +29,13 @@ def register_pages(plugin: Plugin) -> None:
         with frame(active="/terminal"):
             ui.label("Local terminal").classes("text-lg")
 
+            ui.notify(
+                "Click on the terminal area to start typing.",
+                color="grey-7",
+                position="top",
+                timeout=5000,
+            )
+
             terminal = (
                 ui.xterm({"cursorBlink": True, "fontSize": 14})
                 .classes("w-full h-[70vh]")
@@ -63,6 +70,23 @@ def register_pages(plugin: Plugin) -> None:
 
             terminal.on_data(_on_data)
             terminal.on_resize(_on_resize)
+
+            # Command input bar with send button so users have a visible way
+            # to submit commands (in addition to typing in the xterm area).
+            with ui.row().classes("w-full items-center gap-2 mt-2"):
+                cmd_input = ui.input(
+                    placeholder="Type a command and press Send or Enter",
+                ).classes("grow")
+
+                def _on_send() -> None:
+                    cmd = cmd_input.value
+                    if cmd:
+                        # Append a newline so the shell executes the command
+                        session.write((cmd + "\n").encode())
+                        cmd_input.value = ""
+
+                cmd_input.on("keydown.enter", _on_send)
+                ui.button("Send", on_click=_on_send, icon="play_arrow")
 
             def _cleanup() -> None:
                 loop.remove_reader(fd)
