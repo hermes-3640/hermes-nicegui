@@ -755,6 +755,19 @@ def register_pages(plugin: Plugin) -> None:
 
         _run_in_client(do_create)
 
+    def _stop_session_list(session_id: str) -> None:
+        async def do_stop() -> None:
+            try:
+                await client.stop_session(session_id)
+            except HermesError as exc:
+                ui.notify(f"Stop request failed: {exc}", type="warning")
+                return
+            ui.notify("Session stopped", type="info")
+            # Re-render to drop the spinner now that the session is ended
+            render_rows()
+
+        _run_in_client(do_stop)
+
     @ui.page("/sessions", title="Sessions")
     async def sessions_page() -> None:
         with frame(active="/sessions"):
@@ -809,6 +822,13 @@ def register_pages(plugin: Plugin) -> None:
                     with ui.item_section().props("side top"):
                         if is_running(s):
                             ui.spinner(size="sm", color="positive").mark("session-running")
+                            ui.button(
+                                icon="stop",
+                                color="negative",
+                                on_click=partial(_stop_session_list, s.id),
+                            ).props("flat dense size=sm").mark("session-list-stop").tooltip(
+                                "Stop running session"
+                            )
                         ui.label(fmt_age(s.last_active)).classes("text-xs opacity-60")
                         if unread:
                             ui.icon("circle", size="8px", color="primary")
