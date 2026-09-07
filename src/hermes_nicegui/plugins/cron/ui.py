@@ -132,6 +132,28 @@ def register_pages(plugin: Plugin) -> None:
 
             def render_job_row(job: Job) -> None:
                 icon, color = state_icon(job.state)
+
+                def _confirm_delete() -> None:
+                    with ui.dialog() as dialog, ui.card().classes("w-full max-w-xs"):
+                        ui.label(f"Delete job '{job.name or job.id}'?").classes(
+                            "text-lg font-bold"
+                        )
+                        ui.label("This action cannot be undone.").classes("text-sm opacity-70")
+                        with ui.row().classes("w-full justify-end gap-2"):
+                            ui.button("Cancel", on_click=dialog.close).props("flat")
+                            ui.button(
+                                "Delete",
+                                icon="delete",
+                                color="negative",
+                                on_click=lambda: _delete_job(
+                                    job.id,
+                                    lambda: background_tasks.create(load_list()),
+                                )
+                                or dialog.close(),
+                            ).mark("confirm-delete-button")
+
+                    dialog.open()
+
                 with (
                     ui.item(on_click=partial(ui.navigate.to, f"/cron/{job.id}"))
                     .props("v-ripple")
@@ -149,6 +171,30 @@ def register_pages(plugin: Plugin) -> None:
                             ui.badge("script", color="secondary").props("outline").mark(
                                 "script-badge"
                             ).tooltip(job.script or "script-only job")
+                    with ui.item_section().props("side"):
+                        # Pause/resume
+                        ui.button(
+                            icon="pause" if job.enabled else "play_arrow",
+                            color="warning" if job.enabled else "positive",
+                        ).props("flat dense size=sm").on(
+                            "click.stop",
+                            lambda: _pause_resume(
+                                job,
+                                lambda updated: background_tasks.create(load_list()),
+                            ),
+                        ).mark("pause-resume-button").tooltip(
+                            "Pause" if job.enabled else "Resume"
+                        )
+                        # Delete
+                        ui.button(
+                            icon="delete",
+                            color="negative",
+                        ).props("flat dense size=sm").on(
+                            "click.stop",
+                            _confirm_delete,
+                        ).mark("delete-job-button").tooltip(
+                            f"Delete '{job.name or job.id}'"
+                        )
 
             async def load_list() -> None:
                 try:
