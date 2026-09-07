@@ -185,6 +185,20 @@ def register_pages(plugin: Plugin) -> None:
                         ).mark("pause-resume-button").tooltip(
                             "Pause" if job.enabled else "Resume"
                         )
+
+                        # Edit
+                        ui.button(
+                            icon="edit",
+                            color="info",
+                        ).props("flat dense size=sm").on(
+                            "click.stop",
+                            lambda j=job: _edit_job_dialog(
+                                j,
+                                lambda updated: background_tasks.create(load_list()),
+                            ),
+                        ).mark("edit-job-button").tooltip(
+                            f"Edit '{job.name or job.id}'"
+                        )
                         # Delete
                         ui.button(
                             icon="delete",
@@ -243,6 +257,65 @@ def register_pages(plugin: Plugin) -> None:
             on_updated(updated)
 
         background_tasks.create(do_run())
+
+    def _edit_job_dialog(job: Job, on_updated: Any) -> None:
+        with ui.dialog() as dialog, ui.card().classes("w-full max-w-md"):
+            ui.label("Edit cron job").classes("text-lg font-bold")
+            name = ui.input("Name", value=job.name).props("outlined dense").classes("w-full").mark(
+                "edit-job-name"
+            )
+            schedule = (
+                ui.input("Schedule", value=job.schedule_display)
+                .props("outlined dense")
+                .classes("w-full")
+                .mark("edit-job-schedule")
+            )
+            prompt = ui.textarea("Prompt", value=job.prompt or "").props("outlined dense").classes(
+                "w-full"
+            )
+            if job.no_agent:
+                prompt.props("disabled")
+                ui.label("Prompt is ignored for script-only (no-agent) jobs.").props("caption")
+            deliver = (
+                ui.input("Deliver", value=job.deliver or "")
+                .props("outlined dense")
+                .classes("w-full")
+            )
+            skills = (
+                ui.input("Skills", value=skills_to_text(job.skills))
+                .props("outlined dense")
+                .classes("w-full")
+            )
+            repeat = (
+                ui.number(
+                    "Repeat (blank = forever)",
+                    value=job.repeat_times,
+                    min=1,
+                )
+                .props("outlined dense")
+                .classes("w-full")
+            )
+
+            async def do_save() -> None:
+                fields: dict[str, Any] = {
+                    "name": (name.value or "").strip(),
+                    "schedule": (schedule.value or "").strip(),
+                    "prompt": (prompt.value or "").strip(),
+                    "deliver": (deliver.value or "").strip() or None,
+                    "skills": text_to_skills(skills.value or ""),
+                    "repeat": int(repeat.value) if repeat.value else None,
+                }
+                if not fields["name"] or not fields["schedule"]:
+                    ui.notify("Name and schedule are required", type="warning")
+                    return
+                _save_fields(job.id, fields, lambda updated: (dialog.close(), on_updated(updated)))
+
+            with ui.row().classes("w-full justify-end gap-2"):
+                ui.button("Cancel", on_click=dialog.close).props("flat")
+                ui.button(
+                    "Save", on_click=lambda: background_tasks.create(do_save())
+                ).mark("edit-job-confirm")
+        dialog.open()
 
     def _delete_job(job_id: str, on_deleted: Any) -> None:
         async def do_delete() -> None:
