@@ -138,7 +138,7 @@ def register_pages(plugin: Plugin) -> None:
             assignee = (
                 ui.input("Assignee", value="default").props("outlined dense").classes("w-full")
             )
-            priority = ui.number("Priority", value=2, min=0, max=5).props("outlined dense")
+            priority = ui.number("Priority", value=2, min=0, max=9).props("outlined dense")
             status = (
                 ui.select(CANONICAL_COLUMNS, value="triage", label="Initial status")
                 .props("outlined dense")
@@ -538,7 +538,7 @@ def register_pages(plugin: Plugin) -> None:
                     .mark("task-assignee-input")
                 )
                 priority_input = (
-                    ui.number("Priority", value=task.priority, min=0, max=5)
+                    ui.number("Priority", value=task.priority, min=0, max=9)
                     .props("outlined dense")
                     .classes("w-full")
                     .mark("task-priority-input")
