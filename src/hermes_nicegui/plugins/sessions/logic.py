@@ -173,7 +173,7 @@ _APP_LEAK_PATTERNS = [
 _APP_LEAK_RE = re.compile("|".join(_APP_LEAK_PATTERNS))
 
 
-def clean_preview(text: str) -> str | None:
+def clean_preview(text: str | None) -> str | None:
     """Strip NiceGUI/Vue build artifacts from session preview text.
 
     When a browser session captures page HTML source or the agent accidentally
@@ -182,11 +182,12 @@ def clean_preview(text: str) -> str | None:
     session-list q-item rows. This function removes known artifact patterns so
     the preview reflects the actual user content.
 
-    Returns ``None`` if the text becomes empty or too short after cleaning
-    (fewer than 5 chars), so the caller can fall back to ``"No preview"``.
+    Returns ``None`` if the text is empty, becomes empty or too short after
+    cleaning (fewer than 5 chars), so the caller can fall back to
+    ``"No preview"``.
     """
     if not text:
-        return text
+        return None
     cleaned = _BUILD_ARTIFACT_RE.sub(" ", text)
     cleaned = _APP_LEAK_RE.sub(" ", cleaned)
     collapsed = " ".join(cleaned.split())
