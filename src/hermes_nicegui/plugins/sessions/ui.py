@@ -1021,12 +1021,12 @@ def register_pages(plugin: Plugin) -> None:
                             running_tooltip = ui.tooltip("")
                     running_indicator.set_visibility(False)
                 stats_label = ui.label(_stats_text())
-                with ui.row():
-                    ui.input(
-                        "Rename",
-                        placeholder=session.title or "",
+                with ui.row().classes("items-center gap-2"):
+                    ui.label("Rename").classes("text-caption font-bold")
+                    rename_input = ui.input(
+                        placeholder=session.title or "Click to type new name",
                         on_change=lambda e: _rename(session_id, e.value or "", None),
-                    ).props("outlined")
+                    ).props("outlined dense").classes("flex-grow")
                     ui.button(
                         "Delete",
                         icon="delete",
