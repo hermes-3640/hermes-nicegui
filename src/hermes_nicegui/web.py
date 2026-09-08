@@ -244,9 +244,15 @@ def frame(*, active: str = "") -> Iterator[None]:
                 "topbar-new-session-button"
             )
             if state.profiles:
+                # Resolve the display value against the available profile list.
+                # If the stored profile was deleted/renamed the select would
+                # otherwise render blank (the value isn't in _values so
+                # _value_to_model_value returns None).
+                _stored = current_profile()
+                _profile = _stored if _stored and _stored in state.profiles else "default"
                 ui.select(
                     state.profiles,
-                    value=current_profile() or "default",
+                    value=_profile,
                     on_change=lambda e: (set_current_profile(e.value), ui.navigate.reload()),
                 ).props("dense outlined dark options-dense").classes("text-white w-40").tooltip(
                     "Active Hermes profile"
@@ -287,8 +293,19 @@ def frame(*, active: str = "") -> Iterator[None]:
                 item.label,
                 icon=item.icon,
                 color="primary" if item.route == active else None,
-                on_click=partial(ui.navigate.to, item.route),
+                on_click=lambda: ui.navigate.to(item.route),
             ).props("flat no-caps align=left").classes("w-full justify-start")
+
+        if state.profiles:
+            ui.separator().classes("my-2")
+            ui.label("Profile").classes("text-xs opacity-50 q-mb-xs")
+            ui.select(
+                state.profiles,
+                value=current_profile() or "default",
+                on_change=lambda e: (set_current_profile(e.value), ui.navigate.reload()),
+            ).props("dense outlined small options-dense").classes("w-full").tooltip(
+                "Active Hermes profile"
+            ).mark("profile-select-sidebar")
 
     with ui.column().classes("w-full"):
         yield

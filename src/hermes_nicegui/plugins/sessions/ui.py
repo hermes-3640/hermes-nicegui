@@ -831,7 +831,7 @@ def register_pages(plugin: Plugin) -> None:
                     ui.input(placeholder="Search")
                     .props("outlined dense clearable")
                     .classes("flex-grow")
-                    .on("change", lambda: _search_or_source_changed())
+                    .on("update:model-value", lambda: _search_or_source_changed())
                 )
                 source_filter = (
                     ui.select(SOURCES, value="")
@@ -890,7 +890,7 @@ def register_pages(plugin: Plugin) -> None:
                         ui.item_label(s.title or "(untitled)").classes(
                             "font-bold" if unread else ""
                         )
-                        ui.item_label(s.preview or "No preview").props("caption lines=1")
+                        ui.item_label(oneline(s.preview) if s.preview else "No preview").props("caption lines=1")
                     with ui.item_section().props("side top"):
                         if is_running(s):
                             ui.spinner(size="sm", color="positive").mark("session-running")
@@ -1021,12 +1021,12 @@ def register_pages(plugin: Plugin) -> None:
                             running_tooltip = ui.tooltip("")
                     running_indicator.set_visibility(False)
                 stats_label = ui.label(_stats_text())
-                with ui.row():
-                    ui.input(
-                        "Rename",
-                        placeholder=session.title or "",
+                with ui.row().classes("items-center gap-2"):
+                    ui.label("Rename").classes("text-caption font-bold")
+                    rename_input = ui.input(
+                        placeholder=session.title or "Click to type new name",
                         on_change=lambda e: _rename(session_id, e.value or "", None),
-                    ).props("outlined")
+                    ).props("outlined dense").classes("flex-grow")
                     ui.button(
                         "Delete",
                         icon="delete",
@@ -1176,36 +1176,14 @@ def register_pages(plugin: Plugin) -> None:
 
             def _sync_streaming_controls() -> None:
                 """Reflect the `streaming` flag on every control it gates --
-                the stop button, and "Load earlier" (which must not run
-                concurrently with a live turn's own DOM rebuild -- see
-                `_render_live`'s history/live split, which assumes nothing
-                is ever inserted before `pending_index`/`live_entry_mark`
-                while a turn is in flight)."""
-                nonlocal stop_button
+                the stop button (shown/hidden in-place), and "Load earlier"
+                (which must not run concurrently with a live turn's own DOM
+                rebuild -- see `_render_live`'s history/live split, which
+                assumes nothing is ever inserted before
+                `pending_index`/`live_entry_mark` while a turn is in flight)."""
                 should_show = streaming or is_running(session)
-                if should_show and stop_button is None:
-                    # Re-create (the element may have been deleted previously)
-                    with ui.row():
-                        stop_button = (
-                            ui.button(icon="stop", color="negative", on_click=_stop)
-                            .props("round dense")
-                            .mark("chat-stop")
-                        )
-                elif should_show and stop_button is not None:
-                    # Already present and visible; ensure it's attached
-                    if _is_attached(stop_button):
-                        pass  # fine as-is
-                    else:
-                        # Was detached by a concurrent teardown; rebuild
-                        with ui.row():
-                            stop_button = (
-                                ui.button(icon="stop", color="negative", on_click=_stop)
-                                .props("round dense")
-                                .mark("chat-stop")
-                            )
-                elif not should_show and stop_button is not None:
-                    _delete_if_attached(stop_button)
-                    stop_button = None
+                if stop_button is not None:
+                    stop_button.set_visibility(should_show)
                 if earlier_button is not None:
                     earlier_button.set_enabled(not streaming)
 
@@ -1327,8 +1305,16 @@ def register_pages(plugin: Plugin) -> None:
                 sent_at = datetime.now().timestamp()
                 if own_local_ids:
                     turn_local_ids: set[int] = set(own_local_ids)
+                    # Exclude user message ids from turn_local_ids — the
+                    # reconciliation should not remove the user's own input;
+                    # it stays in the buffer and the gateway's run.completed
+                    # assistant messages are inserted after it rather than
+                    # replacing it.
+                    user_ids = {m.id for m in loaded_messages if m.role == "user"}
+                    turn_local_ids -= user_ids
                 else:
-                    turn_local_ids = {_append_local_message("user", text, sent_at)}
+                    _append_local_message("user", text, sent_at)
+                    turn_local_ids = set()  # Don't track user message id
                 # A plain non-None list (Message.tool_calls is `list | None`);
                 # `pending.tool_calls` is assigned this same object so the
                 # buffer render sees every append.
@@ -1577,29 +1563,52 @@ def register_pages(plugin: Plugin) -> None:
                     _queue_message(text)
                     return
                 streaming = True
-                stream_task = asyncio.current_task()
-                try:
-                    own_ids: list[int] | None = None
-                    while True:
-                        await _run_turn(text, own_local_ids=own_ids)
-                        if queued_turn is None:
-                            break
-                        text, own_ids = queued_turn.text, queued_turn.local_ids
-                        queued_turn = None
-                finally:
-                    streaming = False
-                    stream_task = None
-                # Turn(s) finished (or were stopped) — refresh the header stats.
-                try:
-                    session = await store.sessions.get_session(session_id)
-                except HermesError:
-                    pass
-                else:
-                    stats_label.set_text(_stats_text())
-                    _update_running_indicator(
-                        is_running(session), session.last_activity_description
-                    )
-                    _sync_streaming_controls()
+
+                # Capture the client context so UI operations work from the
+                # background task.  Without this, _render_live/scroll/notify
+                # inside the turn loop silently no-op because the task has no
+                # slot stack (confirmed: this is the same pattern
+                # _run_in_client uses at line 738).
+                page_client = ui.context.client
+
+                # Run the turn loop in a background task so a browser
+                # disconnect (which cancels the page coroutine) does not kill
+                # the streaming SSE connection.  The background task outlives
+                # the page and keeps the turn processing alive.
+                async def _run_turns() -> None:
+                    nonlocal streaming, stream_task, session, queued_turn, text
+                    try:
+                        own_ids: list[int] | None = None
+                        while True:
+                            with page_client:
+                                await _run_turn(text, own_local_ids=own_ids)
+                            if queued_turn is None:
+                                break
+                            text, own_ids = queued_turn.text, queued_turn.local_ids
+                            queued_turn = None
+                    finally:
+                        streaming = False
+                        stream_task = None
+                        # Turn(s) finished (or were stopped) — refresh the
+                        # header stats.
+                        try:
+                            fresh = await store.sessions.get_session(
+                                session_id
+                            )
+                        except HermesError:
+                            pass
+                        else:
+                            session = fresh
+                            stats_label.set_text(_stats_text())
+                            _update_running_indicator(
+                                is_running(session),
+                                session.last_activity_description,
+                            )
+                            _sync_streaming_controls()
+
+                stream_task = background_tasks.create(
+                    _run_turns(), name=f"turn-{session_id}"
+                )
 
             async def _do_stop() -> None:
                 nonlocal queued_turn, stream_task, session
