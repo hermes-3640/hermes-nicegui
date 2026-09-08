@@ -307,7 +307,17 @@ def frame(*, active: str = "") -> Iterator[None]:
                 "Active Hermes profile"
             ).mark("profile-select-sidebar")
 
+    # Resolve the page title from the active nav item so every plugin page
+    # gets a semantic <h1> automatically (solves the a11y H1 bug).
+    _title = ""
+    for item in state.nav_items:
+        if item.route == active:
+            _title = item.label
+            break
+
     with ui.column().classes("w-full"):
+        if _title:
+            ui.markdown(f"# {_title}").classes("text-2xl font-bold q-ma-none")
         yield
 
 
