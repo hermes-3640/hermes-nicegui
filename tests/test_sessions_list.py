@@ -178,7 +178,7 @@ async def test_search_filters_list(user: User, context: PluginContext) -> None:
     await user.should_see("Cron run")
     search = user.find(kind=ui.input)
     search.type("cron")
-    search.trigger("change")
+    search.trigger("update:model-value")
     await user.should_see("Cron run", retries=10)
     await user.should_not_see("First session", retries=10)
 

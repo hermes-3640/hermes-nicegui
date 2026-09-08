@@ -244,9 +244,15 @@ def frame(*, active: str = "") -> Iterator[None]:
                 "topbar-new-session-button"
             )
             if state.profiles:
+                # Resolve the display value against the available profile list.
+                # If the stored profile was deleted/renamed the select would
+                # otherwise render blank (the value isn't in _values so
+                # _value_to_model_value returns None).
+                _stored = current_profile()
+                _profile = _stored if _stored and _stored in state.profiles else "default"
                 ui.select(
                     state.profiles,
-                    value=current_profile() or "default",
+                    value=_profile,
                     on_change=lambda e: (set_current_profile(e.value), ui.navigate.reload()),
                 ).props("dense outlined dark options-dense").classes("text-white w-40").tooltip(
                     "Active Hermes profile"
