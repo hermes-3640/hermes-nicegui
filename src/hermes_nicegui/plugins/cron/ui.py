@@ -156,7 +156,7 @@ def register_pages(plugin: Plugin) -> None:
 
                 with (
                     ui.item(on_click=partial(ui.navigate.to, f"/cron/{job.id}"))
-                    .props("v-ripple")
+                    .props("clickable v-ripple")
                     .mark("job-row")
                 ):
                     with ui.item_section().props("avatar"):

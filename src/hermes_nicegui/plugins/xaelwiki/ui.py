@@ -116,7 +116,7 @@ def register_pages(plugin: Plugin) -> None:
             def render_note_row(note: Note) -> None:
                 with (
                     ui.item(on_click=partial(ui.navigate.to, f"/xaelwiki/{note.id}"))
-                    .props("v-ripple")
+                    .props("clickable v-ripple")
                     .mark("notes-card")
                 ):
                     with ui.item_section().props("avatar"):

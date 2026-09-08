@@ -881,7 +881,7 @@ def register_pages(plugin: Plugin) -> None:
 
                 with (
                     ui.item(on_click=partial(ui.navigate.to, f"/sessions/{s.id}"))
-                    .props("v-ripple")
+                    .props("clickable v-ripple")
                     .mark("session-row")
                 ):
                     with ui.item_section().props("avatar"):
