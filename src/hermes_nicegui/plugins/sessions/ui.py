@@ -1780,7 +1780,7 @@ def register_pages(plugin: Plugin) -> None:
                     )
 
                     _sync_streaming_controls()
-                    ui.button(icon="send", on_click=lambda: _run_in_client(send)).props(
+                    ui.button("Send", icon="send", on_click=lambda: _run_in_client(send)).props(
                         "round dense"
                     ).mark("chat-send")
 
