@@ -1557,6 +1557,19 @@ def register_pages(plugin: Plugin) -> None:
                     text = "\n\n".join(part for part in (text, block) if part)
                     pending_attachments.clear()
                     _render_attachments()
+                # Slash command: route to the /slash endpoint, not the chat stream.
+                if text.startswith("/"):
+                    try:
+                        resp = await client.slash_turn(session_id, text)
+                        output = resp.get("output", "")
+                        # Append the command output to the transcript so the user
+                        # sees what the slash command returned.
+                        transcript.append({"role": "slash", "content": f"`{text}`\n\n{output}"})
+                        _render_history()
+                        _scroll_to_bottom(transcript)
+                    except HermesError as exc:
+                        ui.notify(f"Slash command failed: {exc}", type="negative")
+                    return
                 if streaming:
                     # A turn is already running: hold the message and deliver
                     # it as the next turn instead of firing a second concurrent

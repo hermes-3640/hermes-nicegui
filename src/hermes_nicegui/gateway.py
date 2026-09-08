@@ -651,3 +651,14 @@ class HermesClient:
         no live turn.
         """
         return await self._request("POST", f"/api/sessions/{session_id}/stop")
+
+    async def slash_turn(self, session_id: str, command: str) -> dict[str, Any]:
+        """Execute a slash command against a session.
+
+        Accepts a command like ``"/help"`` and returns the gateway's response
+        as JSON (``{"output": "...", "session_id": "..."}``).
+        """
+        return await self._request(
+            "POST", f"/api/sessions/{session_id}/slash", json={"command": command}
+        )
+
