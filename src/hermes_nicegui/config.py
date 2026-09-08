@@ -101,7 +101,7 @@ class Settings(BaseSettings):
     # this at the xaelwiki service's notes directory; the process user must
     # be able to read it (on the deploy box the hermes user is added to the
     # xaelwiki group for exactly this).
-    xaelwiki_notes_dir: str = "/var/lib/xaelwiki/notes"
+    xaelwiki_notes_dir: str = "/var/lib/hermes/content/skills"
     # How often the list re-scans the vault (also the store's cache TTL).
     xaelwiki_refresh_seconds: int = 30
 
