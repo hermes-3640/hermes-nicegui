@@ -296,6 +296,17 @@ def frame(*, active: str = "") -> Iterator[None]:
                 on_click=lambda: ui.navigate.to(item.route),
             ).props("flat no-caps align=left").classes("w-full justify-start")
 
+        if state.profiles:
+            ui.separator().classes("my-2")
+            ui.label("Profile").classes("text-xs opacity-50 q-mb-xs")
+            ui.select(
+                state.profiles,
+                value=current_profile() or "default",
+                on_change=lambda e: (set_current_profile(e.value), ui.navigate.reload()),
+            ).props("dense outlined small options-dense").classes("w-full").tooltip(
+                "Active Hermes profile"
+            ).mark("profile-select-sidebar")
+
     with ui.column().classes("w-full"):
         yield
 
