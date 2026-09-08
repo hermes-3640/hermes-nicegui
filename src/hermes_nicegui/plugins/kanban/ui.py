@@ -297,7 +297,7 @@ def register_pages(plugin: Plugin) -> None:
                 label, icon, color = column_meta(task.status)
                 with (
                     ui.item(on_click=partial(ui.navigate.to, f"/kanban/{task.id}"))
-                    .props("v-ripple")
+                    .props("v-ripple clickable")
                     .mark("task-card")
                 ):
                     with ui.item_section().props("avatar"):
