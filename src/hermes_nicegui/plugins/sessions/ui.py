@@ -905,15 +905,40 @@ def register_pages(plugin: Plugin) -> None:
                         if unread:
                             ui.icon("circle", size="8px", color="primary")
                     with ui.item_section().props("side"):
-                        # `click.stop` (Vue's `.stop` modifier) keeps this
-                        # from also triggering the row's own `on_click`
-                        # navigation — same pattern as the files plugin.
-                        ui.button(icon="delete", color="negative").props(
-                            "flat dense size=sm"
-                        ).on(
-                            "click.stop",
-                            _confirm_delete,
-                        ).mark("delete-session-button").tooltip(f"Delete '{s.title or s.id}'")
+                        with ui.row().classes("items-center gap-0.5"):
+                            # `click.stop` (Vue's `.stop` modifier) keeps this
+                            # from also triggering the row's own `on_click`
+                            # navigation — same pattern as the files plugin.
+                            ui.button(
+                                icon="chat",
+                            ).props("flat dense size=sm").on(
+                                "click.stop",
+                                partial(ui.navigate.to, f"/sessions/{s.id}"),
+                            ).mark("chat-session-button").tooltip(
+                                f"Chat with '{s.title or s.id}'"
+                            )
+                            ui.button(
+                                icon="edit",
+                            ).props("flat dense size=sm").on(
+                                "click.stop",
+                                partial(
+                                    _rename,
+                                    s.id,
+                                    s.title or "",
+                                    render_rows,
+                                ),
+                            ).mark("rename-session-button").tooltip(
+                                f"Rename '{s.title or s.id}'"
+                            )
+                            ui.button(
+                                icon="delete",
+                                color="negative",
+                            ).props("flat dense size=sm").on(
+                                "click.stop",
+                                _confirm_delete,
+                            ).mark("delete-session-button").tooltip(
+                                f"Delete '{s.title or s.id}'"
+                            )
 
             def render_rows() -> None:
                 """Render the current page's already-fetched sessions.
