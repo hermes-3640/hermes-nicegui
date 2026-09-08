@@ -890,7 +890,7 @@ def register_pages(plugin: Plugin) -> None:
                         ui.item_label(s.title or "(untitled)").classes(
                             "font-bold" if unread else ""
                         )
-                        ui.item_label(s.preview or "No preview").props("caption lines=1")
+                        ui.item_label(oneline(s.preview) if s.preview else "No preview").props("caption lines=1")
                     with ui.item_section().props("side top"):
                         if is_running(s):
                             ui.spinner(size="sm", color="positive").mark("session-running")
