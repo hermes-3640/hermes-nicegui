@@ -649,8 +649,31 @@ class HermesClient:
 
         The gateway answers 409 ``session_not_running`` when the session has
         no live turn.
+
+        On daemon versions that lack ``/api/sessions/{id}/stop``, this falls
+        back to ``GET /api/sessions/{id}/`` to read the running turn, then
+        POSTs ``/v1/runs/{run_id}/stop``.
         """
-        return await self._request("POST", f"/api/sessions/{session_id}/stop")
+        try:
+            return await self._request("POST", f"/api/sessions/{session_id}/stop")
+        except HermesError:
+            pass
+        # Fallback: find the running turn via the session detail, then stop
+        # that run directly.
+        detail = await self._request("GET", f"/api/sessions/{session_id}")
+        inner = detail.get("session") or detail
+        runs: list[dict[str, Any]] = inner.get("runs", [])
+        running_id: str | None = None
+        for r in reversed(runs):
+            if r.get("status") == "running":
+                running_id = r.get("id")
+                break
+        if running_id:
+            return await self.stop_run(running_id)
+        # Nothing running — surface the original 404 so the caller knows.
+        raise HermesError(
+            f"POST /api/sessions/{session_id}/stop -> 404 (no fallback run found)"
+        )
 
     async def slash_turn(self, session_id: str, command: str) -> dict[str, Any]:
         """Execute a slash command against a session.
