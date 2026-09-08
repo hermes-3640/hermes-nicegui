@@ -1327,8 +1327,16 @@ def register_pages(plugin: Plugin) -> None:
                 sent_at = datetime.now().timestamp()
                 if own_local_ids:
                     turn_local_ids: set[int] = set(own_local_ids)
+                    # Exclude user message ids from turn_local_ids — the
+                    # reconciliation should not remove the user's own input;
+                    # it stays in the buffer and the gateway's run.completed
+                    # assistant messages are inserted after it rather than
+                    # replacing it.
+                    user_ids = {m.id for m in loaded_messages if m.role == "user"}
+                    turn_local_ids -= user_ids
                 else:
-                    turn_local_ids = {_append_local_message("user", text, sent_at)}
+                    _append_local_message("user", text, sent_at)
+                    turn_local_ids = set()  # Don't track user message id
                 # A plain non-None list (Message.tool_calls is `list | None`);
                 # `pending.tool_calls` is assigned this same object so the
                 # buffer render sees every append.
