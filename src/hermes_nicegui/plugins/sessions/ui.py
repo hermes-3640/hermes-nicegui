@@ -1049,6 +1049,7 @@ def register_pages(plugin: Plugin) -> None:
                 with ui.row().classes("items-center gap-2"):
                     ui.label("Rename").classes("text-caption font-bold")
                     rename_input = ui.input(
+                        value=session.title,
                         placeholder=session.title or "Click to type new name",
                         on_change=lambda e: _rename(session_id, e.value or "", None),
                     ).props("outlined dense").classes("flex-grow")
