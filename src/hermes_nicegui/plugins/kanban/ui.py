@@ -46,6 +46,7 @@ import json
 from functools import partial
 from typing import Any, cast
 
+import os
 from nicegui import background_tasks, ui
 
 from hermes_nicegui import web
@@ -189,8 +190,56 @@ def register_pages(plugin: Plugin) -> None:
     async def kanban_board_page() -> None:
         ui.add_css(_RUNNING_ICON_CSS)
         with frame(active="/kanban"):
+            # Pause/resume state label + button (read on each load_board call)
+            paused_label = ui.label()
+            paused_label.set_visibility(False)
+
+            def _is_paused() -> bool:
+                stoptoken = os.environ.get("HERMES_KANBAN_STOPTOKEN") or os.path.expanduser(
+                    "~/.hermes/.stoptoken"
+                )
+                return os.path.exists(stoptoken)
+
+            def _update_pause_indicator() -> None:
+                if _is_paused():
+                    paused_label.set_text("⚠ Dispatch paused")
+                    paused_label.set_visibility(True)
+                    pause_button.set_text("Resume")
+                    pause_button.set_icon("play_arrow")
+                else:
+                    paused_label.set_visibility(False)
+                    pause_button.set_text("Pause")
+                    pause_button.set_icon("pause")
+
+            pause_button: ui.button
+
+            async def do_toggle_pause() -> None:
+                try:
+                    if _is_paused():
+                        result = await web.current_executor().run("resume")
+                    else:
+                        result = await web.current_executor().run("pause", "--reason", "paused from kanban UI")
+                    if result.returncode != 0:
+                        ui.notify(
+                            f"Failed to toggle pause: {result.stderr[:500]}",
+                            type="negative",
+                        )
+                        return
+                    ui.notify("Paused" if _is_paused() else "Resumed", type="positive")
+                    _update_pause_indicator()
+                    await load_board()
+                except Exception as exc:
+                    ui.notify(f"Toggle pause failed: {exc}", type="negative")
+
             with ui.row().classes("w-full items-center gap-2"):
                 ui.label("Kanban board").classes("text-lg")
+                with ui.row().classes("items-center gap-1"):
+                    pause_button = ui.button(
+                        "Pause",
+                        icon="pause",
+                        on_click=lambda: background_tasks.create(do_toggle_pause()),
+                    ).props("flat round dense").mark("pause-resume-button").tooltip("Pause work")
+                    paused_label.classes("text-xs text-negative")
                 ui.space()
                 ui.button(
                     icon="bolt", on_click=lambda: background_tasks.create(do_dispatch())
@@ -314,6 +363,7 @@ def register_pages(plugin: Plugin) -> None:
             async def load_board() -> None:
                 nonlocal total
                 status_filter = cast(str, filter_tabs.value) or "all"
+                _update_pause_indicator()
                 try:
                     current_tasks[:], total = await web.current_store().kanban.list_tasks(
                         status=None if status_filter == "all" else status_filter,
