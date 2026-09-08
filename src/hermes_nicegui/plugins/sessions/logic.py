@@ -149,14 +149,23 @@ def source_icon(source: str | None) -> str:
 #: must be stripped from the session-list preview so q-item text shows actual
 #: session content, not framework artifacts.
 _BUILD_ARTIFACT_PATTERNS = [
-    r'import\s+\*\s+as\s+\w+\s+from\s+["\x27]vue["\x27]\s*;',
-    r'globalThis\.\w+\s*=\s*\w+\s*;',
-    r'document\.getElementById\(["\x27]esm-fallback["\x27]\)\?\.remove\(\)\s*;',
-    r'getElementById\(["\x27]esm-fallback["\x27]\)\?\.remove\(\)',
+    # ESM import map / Vue bootstrap
+    r'import\s+\*\s+as\s+\w+\s+from\s+["\x27]?vue["\x27]?\s*;',
+    r'globalThis\.\w+\s*=\s*\w+;',
+    # DOM fallback element removal
+    r'document\.getElementById\(["\x27]?esm-fallback["\x27]?\)\?\.remove\(\)\s*;',
+    r'getElementById\(["\x27]?esm-fallback["\x27]?\)\?\.remove\(\)',
+    # importmap script body
     r'["\x27]imports["\x27]\s*:\s*\{.*?\}',
+    # DOMPurify loader comment
     r'//\s*Load\s+DOMPurify\s+for\s+HTML\s+sanitization',
+    # Standalone artifact keywords
+    r'\bimportmap\b',
+    r'\besm-fallback\b',
+    r'\bmodule\b(?=\s*(type|src))',
+    r'type=["\x27]module["\x27]',
 ]
-_BUILD_ARTIFACT_RE = re.compile("|".join(_BUILD_ARTIFACT_PATTERNS))
+_BUILD_ARTIFACT_RE = re.compile("|".join(_BUILD_ARTIFACT_PATTERNS), re.IGNORECASE)
 
 _APP_LEAK_PATTERNS = [
     r'parseElements\(\s*String\.raw`.*?`\s*\)',
