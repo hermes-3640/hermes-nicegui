@@ -293,7 +293,7 @@ def frame(*, active: str = "") -> Iterator[None]:
                 item.label,
                 icon=item.icon,
                 color="primary" if item.route == active else None,
-                on_click=lambda: ui.navigate.to(item.route),
+                on_click=lambda _event, r=item.route: ui.navigate.to(r),
             ).props("flat no-caps align=left").classes("w-full justify-start")
 
         if state.profiles:
