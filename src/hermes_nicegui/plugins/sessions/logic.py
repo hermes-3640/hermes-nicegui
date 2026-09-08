@@ -144,11 +144,62 @@ def source_icon(source: str | None) -> str:
     return _SOURCE_ICONS.get(source or "", "help_outline")
 
 
+#: Patterns from NiceGUI/Vue build infrastructure that can leak into session
+#: content when a browser session captures page source or HTML as text. These
+#: must be stripped from the session-list preview so q-item text shows actual
+#: session content, not framework artifacts.
+_BUILD_ARTIFACT_PATTERNS = [
+    r'import\s+\*\s+as\s+\w+\s+from\s+["\x27]vue["\x27]\s*;',
+    r'globalThis\.\w+\s*=\s*\w+\s*;',
+    r'document\.getElementById\(["\x27]esm-fallback["\x27]\)\?\.remove\(\)\s*;',
+    r'getElementById\(["\x27]esm-fallback["\x27]\)\?\.remove\(\)',
+    r'["\x27]imports["\x27]\s*:\s*\{.*?\}',
+    r'//\s*Load\s+DOMPurify\s+for\s+HTML\s+sanitization',
+]
+_BUILD_ARTIFACT_RE = re.compile("|".join(_BUILD_ARTIFACT_PATTERNS))
+
+_APP_LEAK_PATTERNS = [
+    r'parseElements\(\s*String\.raw`.*?`\s*\)',
+    r'createApp\(\s*parseElements',
+    r'app\.use\(Quasar',
+    r'Element\.prototype\.setHTML',
+    r'/_nicegui/\d+\.\d+\.\d+/static/',
+    r'/_nicegui/\d+\.\d+\.\d+/esm/',
+    r'defer\s+src=".*?nicegui\.js"',
+    r'defer\s+src=".*?socket\.io',
+    r'defer\s+src=".*?quasar\.umd',
+    r'defer\s+src=".*?tailwindcss',
+]
+_APP_LEAK_RE = re.compile("|".join(_APP_LEAK_PATTERNS))
+
+
+def clean_preview(text: str) -> str | None:
+    """Strip NiceGUI/Vue build artifacts from session preview text.
+
+    When a browser session captures page HTML source or the agent accidentally
+    includes framework bootstrap code in the conversation, those strings leak
+    into the session's ``preview`` (first user message) and then into the
+    session-list q-item rows. This function removes known artifact patterns so
+    the preview reflects the actual user content.
+
+    Returns ``None`` if the text becomes empty or too short after cleaning
+    (fewer than 5 chars), so the caller can fall back to ``"No preview"``.
+    """
+    if not text:
+        return text
+    cleaned = _BUILD_ARTIFACT_RE.sub(" ", text)
+    cleaned = _APP_LEAK_RE.sub(" ", cleaned)
+    collapsed = " ".join(cleaned.split())
+    if len(collapsed) < 5:
+        return None
+    return collapsed
+
+
 def oneline(text: str, limit: int = 88) -> str:
     """``text`` squashed to a single line and trimmed to ``limit`` chars --
     a collapsed row's summary. Collapses *all* whitespace (not just takes
     the first line): pretty-printed JSON stored with real newlines (e.g.
-    ``'{\\n  "output": "OK",\\n  ...\\n}'``) has ``"{"`` alone as its first
+    ``'{\\n  "output": "OK",\\n  ...\\n}'`` has ``"{"`` alone as its first
     line, which as a summary tells you nothing -- squashing the whole thing
     to one line surfaces the actual content instead."""
     collapsed = " ".join(text.split())
