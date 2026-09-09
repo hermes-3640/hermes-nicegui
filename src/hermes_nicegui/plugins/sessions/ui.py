@@ -891,6 +891,16 @@ def register_pages(plugin: Plugin) -> None:
                         ui.item_label(s.title or "(untitled)").classes(
                             "font-bold" if unread else ""
                         )
+                        # Metadata row: model badge, source name, message count, session ID
+                        with ui.row().classes("items-center gap-1 q-mt-xs"):
+                            if s.model:
+                                ui.badge(s.model, color="grey-7", size="xs").tooltip(s.model)
+                            source_label = SOURCES.get(s.source, s.source or "unknown")
+                            ui.label(source_label).classes("text-xs opacity-50")
+                            if s.message_count:
+                                ui.label(f"{s.message_count} msg").classes("text-xs opacity-50")
+                            if s.id:
+                                ui.label(s.id[:12]).classes("text-xs opacity-30 font-mono")
                         ui.item_label(oneline(clean_preview(s.preview) or "No preview")).props("caption lines=1")
                     with ui.item_section().props("side top"):
                         if is_running(s):
