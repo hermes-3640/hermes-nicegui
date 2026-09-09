@@ -1011,6 +1011,7 @@ def register_pages(plugin: Plugin) -> None:
             logger.debug("sessions list rendered")
 
     @ui.page("/sessions/{session_id}", title="Session")
+    @ui.page("/sessions/{session_id}/", title="Session")
     async def session_detail_page(session_id: str) -> None:
         ui.add_css(_TIMELINE_CSS)
         ui.add_css(_UPLOADER_CSS)
