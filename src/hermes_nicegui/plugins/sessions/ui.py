@@ -1895,6 +1895,7 @@ def register_pages(plugin: Plugin) -> None:
                         ui.button(icon="stop", color="negative", on_click=_stop)
                         .props("round dense")
                         .mark("chat-stop")
+                        .tooltip("Stop running session")
                     )
 
                     _sync_streaming_controls()
