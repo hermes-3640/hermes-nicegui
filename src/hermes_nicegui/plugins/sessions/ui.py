@@ -882,7 +882,7 @@ def register_pages(plugin: Plugin) -> None:
                     dialog.open()
 
                 with (
-                    ui.item(on_click=partial(ui.navigate.to, f"/sessions/{s.id}"))
+                    ui.item().on("click", partial(ui.navigate.to, f"/sessions/{s.id}"))
                     .props("clickable v-ripple")
                     .mark("session-row")
                 ):
