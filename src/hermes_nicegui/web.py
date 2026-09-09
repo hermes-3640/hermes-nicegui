@@ -314,11 +314,15 @@ def frame(*, active: str = "") -> Iterator[None]:
 
     # Resolve the page title from the active nav item so every plugin page
     # gets a semantic <h1> automatically (solves the a11y H1 bug).
+    # When no nav item matches (e.g. the home page), fall back to "Home"
+    # so the H1 is never empty.
     _title = ""
     for item in state.nav_items:
         if item.route == active:
             _title = item.label
             break
+    if not _title:
+        _title = "Home"
 
     with ui.column().classes("w-full"):
         if _title:
@@ -331,7 +335,7 @@ def _register_home() -> None:
 
     @ui.page("/", title="Hermes")
     def home_page() -> None:
-        with frame():
+        with frame(active="/"):
             ui.label("Hermes NiceGUI")
             ui.label("Modular web UI for the Hermes Agent gateway.")
             with ui.row():
@@ -341,6 +345,10 @@ def _register_home() -> None:
                             if item.icon:
                                 ui.icon(item.icon)
                             ui.label(item.label)
+        # Update browser tab title for client-side navigation (e.g. after login).
+        # NiceGUI's @ui.page title="..." only sets it in the initial HTML;
+        # client-side router doesn't update document.title automatically.
+        ui.run_javascript('document.title = "Hermes"')
 
 
 def _register_login_page() -> None:
