@@ -1070,7 +1070,7 @@ def register_pages(plugin: Plugin) -> None:
                         icon="delete",
                         color="negative",
                         on_click=partial(_delete, session_id, lambda: ui.navigate.to("/sessions")),
-                    )
+                    ).mark("delete-session-button").tooltip("Delete session")
             _update_running_indicator(is_running(session), session.last_activity_description)
 
             # Only the latest page of messages is ever fetched/rendered up
