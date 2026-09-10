@@ -254,7 +254,9 @@ def frame(*, active: str = "") -> Iterator[None]:
                     state.profiles,
                     value=_profile,
                     on_change=lambda e: (set_current_profile(e.value), ui.navigate.reload()),
-                ).props("dense outlined dark options-dense").classes("text-white w-40").tooltip(
+                ).props("dense outlined dark options-dense").classes(
+                    "profile-switcher text-white w-40"
+                ).tooltip(
                     "Active Hermes profile"
                 ).mark("profile-select")
             if state.settings and state.settings.auth_enabled:
@@ -281,20 +283,21 @@ def frame(*, active: str = "") -> Iterator[None]:
     drawer = ui.left_drawer(fixed=True)
     with drawer:
         for item in state.nav_items:
-            # A flat, full-width button rather than a ``ui.list``/``ui.item``:
-            # the drawer's own default CSS is a flex column with
-            # `align-items: flex-start` (see `.nicegui-drawer` in NiceGUI's
-            # stylesheet), so a plain item shrinks to its label's width
-            # instead of filling the drawer -- most of the row then looks
-            # like empty drawer background but isn't actually clickable.
-            # `w-full` + `justify-start` makes the whole row both look and
-            # behave like the nav entry it is.
-            ui.button(
-                item.label,
-                icon=item.icon,
-                color="primary" if item.route == active else None,
-                on_click=lambda _event, r=item.route: ui.navigate.to(r),
-            ).props("flat no-caps align=left").classes("w-full justify-start")
+            # Use ``ui.element('a')`` (raw anchor tag) rather than
+            # ``ui.link`` or ``ui.button``.  ``ui.link`` derives its
+            # ``href`` from child text when children are present (a NiceGUI
+            # Vue-template quirk), so the sidebar would get ``href="Sessions"``
+            # instead of ``href="/sessions"``.  ``ui.element('a')`` gives
+            # direct control of the ``href`` attribute, and NiceGUI's client-
+            # side router intercepts internal ``href`` values transparently.
+            link_classes = "no-underline w-full justify-start"
+            if item.route == active:
+                link_classes += " bg-primary text-white"
+            with ui.element('a').props(f'href={item.route}').classes(link_classes):
+                with ui.row().classes("items-center gap-2 q-pa-sm"):
+                    if item.icon:
+                        ui.icon(item.icon)
+                    ui.label(item.label).classes("no-caps")
 
         if state.profiles:
             ui.separator().classes("my-2")
@@ -303,17 +306,23 @@ def frame(*, active: str = "") -> Iterator[None]:
                 state.profiles,
                 value=current_profile() or "default",
                 on_change=lambda e: (set_current_profile(e.value), ui.navigate.reload()),
-            ).props("dense outlined small options-dense").classes("w-full").tooltip(
+            ).props("dense outlined small options-dense").classes(
+                "w-full profile-switcher"
+            ).tooltip(
                 "Active Hermes profile"
             ).mark("profile-select-sidebar")
 
     # Resolve the page title from the active nav item so every plugin page
     # gets a semantic <h1> automatically (solves the a11y H1 bug).
+    # When no nav item matches (e.g. the home page), fall back to "Home"
+    # so the H1 is never empty.
     _title = ""
     for item in state.nav_items:
         if item.route == active:
             _title = item.label
             break
+    if not _title:
+        _title = "Home"
 
     with ui.column().classes("w-full"):
         if _title:
@@ -326,16 +335,20 @@ def _register_home() -> None:
 
     @ui.page("/", title="Hermes")
     def home_page() -> None:
-        with frame():
+        with frame(active="/"):
             ui.label("Hermes NiceGUI")
             ui.label("Modular web UI for the Hermes Agent gateway.")
             with ui.row():
                 for item in state.nav_items:
-                    with ui.link(target=item.route).classes("no-underline"), ui.card():
+                    with ui.element('a').props(f'href={item.route}').classes("no-underline"), ui.card():
                         with ui.row().classes("items-center gap-2"):
                             if item.icon:
                                 ui.icon(item.icon)
                             ui.label(item.label)
+        # Update browser tab title for client-side navigation (e.g. after login).
+        # NiceGUI's @ui.page title="..." only sets it in the initial HTML;
+        # client-side router doesn't update document.title automatically.
+        ui.run_javascript('document.title = "Hermes"')
 
 
 def _register_login_page() -> None:

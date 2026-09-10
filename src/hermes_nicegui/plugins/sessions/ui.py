@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -1056,6 +1057,14 @@ def register_pages(plugin: Plugin) -> None:
                     running_indicator.set_visibility(False)
                 stats_label = ui.label(_stats_text())
                 with ui.row().classes("items-center gap-2"):
+                    ui.button(
+                        "Continue in Chat",
+                        icon="chat",
+                        on_click=partial(ui.navigate.to, f"/sessions/chat/{session_id}"),
+                    ).props("unelevated").mark("continue-in-chat-button").tooltip(
+                        "Open interactive chat for this session"
+                    )
+                with ui.row().classes("items-center gap-2"):
                     ui.label("Rename").classes("text-caption font-bold")
                     rename_input = ui.input(
                         value=session.title,
@@ -1069,6 +1078,102 @@ def register_pages(plugin: Plugin) -> None:
                         on_click=partial(_delete, session_id, lambda: ui.navigate.to("/sessions")),
                     ).mark("delete-session-button").tooltip("Delete session")
             _update_running_indicator(is_running(session), session.last_activity_description)
+
+            @ui.page("/sessions/chat")
+            @ui.page("/sessions/chat/")
+            async def chat_page() -> None:
+                await _chat_session_page(None)
+
+            @ui.page("/sessions/chat/{session_id}")
+            async def chat_resume_page(session_id: str) -> None:
+                await _chat_session_page(session_id)
+
+            async def _chat_session_page(resume_session_id: str | None) -> None:
+                """A live chat page: runs ``hermes chat [--resume <id>]`` in a pty."""
+                from hermes_nicegui.plugins.terminal.logic import PtySession
+
+                with frame(active="/sessions"):
+                    ui.label(
+                        f"Chat with '{resume_session_id or 'new'}'"
+                        if resume_session_id
+                        else "New Chat"
+                    ).classes("text-lg")
+
+                    terminal = (
+                        ui.xterm({"cursorBlink": True, "fontSize": 14})
+                        .classes("w-full h-[70vh]")
+                        .mark("chat-terminal-view")
+                    )
+
+                    cmd = ["hermes", "chat"]
+                    if resume_session_id:
+                        cmd.extend(["--resume", resume_session_id])
+                    # /bin/sh -c so env vars (HERMES_HOME etc.) from the
+                    # process environment are inherited by the hermes child.
+                    pty_session = PtySession(
+                        shell="/bin/sh",
+                        cwd="/var/lib/hermes",
+                        args=["-c", " ".join(cmd)],
+                    )
+                    fd = pty_session.start()
+                    loop = asyncio.get_event_loop()
+
+                    def _pump() -> None:
+                        data = pty_session.read()
+                        if data:
+                            terminal.write(data)
+                        elif data is None:
+                            loop.remove_reader(fd)
+                            terminal.writeln("\r\n[process exited]")
+
+                    loop.add_reader(fd, _pump)
+
+                    def _on_data(e) -> None:
+                        try:
+                            pty_session.write(e.data.encode())
+                        except OSError:
+                            pass
+
+                    def _on_resize(e) -> None:
+                        try:
+                            pty_session.resize(e.cols, e.rows)
+                        except OSError:
+                            pass
+
+                    terminal.on_data(_on_data)
+                    terminal.on_resize(_on_resize)
+
+                    with ui.row().classes("w-full items-center gap-2 mt-2"):
+                        cmd_input = ui.input(
+                            placeholder="Type a command and press Send or Enter",
+                        ).classes("grow")
+
+                        def _on_send() -> None:
+                            c = cmd_input.value
+                            if c:
+                                pty_session.write((c + "\n").encode())
+                                cmd_input.value = ""
+
+                        cmd_input.on("keydown.enter", _on_send)
+                        ui.button("Send", on_click=_on_send, icon="play_arrow")
+
+                    def _cleanup() -> None:
+                        loop.remove_reader(fd)
+                        pty_session.close()
+                        logger.debug("chat session {} closed", pty_session.pid)
+
+                    ui.context.client.on_disconnect(_cleanup)
+
+                    # ResizeObserver for terminal sizing
+                    ui.run_javascript(f"""
+                        (() => {{
+                            const el = getHtmlElement({terminal.id});
+                            if (!el) return;
+                            new ResizeObserver(() => getElement({terminal.id}).fit()).observe(el);
+                        }})();
+                    """)
+
+                    logger.debug("chat page rendered (resume=%s)", resume_session_id)
 
             # Only the latest page of messages is ever fetched/rendered up
             # front -- a session can run to thousands of messages, and

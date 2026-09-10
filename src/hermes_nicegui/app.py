@@ -52,6 +52,44 @@ async def _bootstrap(settings: Settings) -> None:
 
 def main() -> None:
     """Console entry point (``hermes-nicegui``)."""
+    # Fix for: session detail URL changes on browser refresh.
+    # NiceGUI's sub_pages_router._handle_navigate uses json.dumps() which
+    # wraps the path in double-quotes, making the JS string literal
+    # contain quotes (e.g. '"/sessions/api_123"'). The JS comparison then
+    # always fails, triggering history.pushState even when the URL is
+    # already correct. JSON.parse() strips those outer quotes so the
+    # comparison works.
+    import json
+
+    from nicegui import sub_pages_router
+
+    orig_handle_navigate = sub_pages_router.SubPagesRouter._handle_navigate
+
+    async def patched_handle_navigate(self, path: str):
+        # Keep the original logic but fix the JS string literal
+        from nicegui.context import context
+        from nicegui.sub_pages_router import has_any_unresolved_path
+
+        client = context.client
+        await self._handle_open(path)
+        if (
+            not has_any_unresolved_path(client)
+            or not self._other_page_builder_matches_path(path, client)
+        ):
+            current_path_string = json.dumps(self.current_path)
+            client.run_javascript(
+                f"""
+                const fullPath = (window.path_prefix || '') + JSON.parse({current_path_string});
+                if (window.location.pathname + window.location.search + window.location.hash !== fullPath) {{
+                    history.pushState({{page: {current_path_string}}}, "", fullPath);
+                }}
+            """
+            )
+        else:
+            client.open(path, new_tab=False)
+
+    sub_pages_router.SubPagesRouter._handle_navigate = patched_handle_navigate
+
     settings = Settings()
     # Must happen *before* `ui.run()`: it adds Starlette's own
     # `SessionMiddleware` as a side effect of `storage_secret=...`, and
