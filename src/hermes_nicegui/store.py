@@ -57,7 +57,7 @@ WHERE (:source IS NULL OR s.source = :source)
     OR s.source LIKE :search
     OR EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id AND m.content LIKE :search)
   )
-ORDER BY s.last_activity_at DESC
+ORDER BY s.last_activity_at DESC, s.id DESC
 LIMIT :limit OFFSET :offset
 """
 _SESSIONS_COUNT_SQL = """
