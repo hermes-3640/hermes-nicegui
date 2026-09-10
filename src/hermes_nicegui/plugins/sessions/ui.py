@@ -880,76 +880,73 @@ def register_pages(plugin: Plugin) -> None:
 
                     dialog.open()
 
-                with (
-                    ui.item(on_click=partial(ui.navigate.to, f"/sessions/{s.id}"))
-                    .props("clickable v-ripple")
-                    .mark("session-row")
-                ):
-                    with ui.item_section().props("avatar"):
-                        ui.icon(source_icon(s.source))
-                    with ui.item_section():
-                        ui.item_label(s.title or "(untitled)").classes(
-                            "font-bold" if unread else ""
-                        )
-                        # Metadata row: model badge, source name, message count, session ID
-                        with ui.row().classes("items-center gap-1 q-mt-xs"):
-                            if s.model:
-                                ui.badge(s.model, color="grey-7", size="xs").tooltip(s.model)
-                            source_label = SOURCES.get(s.source, s.source or "unknown")
-                            ui.label(source_label).classes("text-xs opacity-50")
-                            if s.message_count:
-                                ui.label(f"{s.message_count} msg").classes("text-xs opacity-50")
-                            if s.id:
-                                ui.label(s.id[:12]).classes("text-xs opacity-30 font-mono")
-                        ui.item_label(oneline(clean_preview(s.preview) or "No preview")).props("caption lines=1")
-                    with ui.item_section().props("side top"):
-                        if is_running(s):
-                            ui.spinner(size="sm", color="positive").mark("session-running")
-                            ui.button(
-                                icon="stop",
-                                color="negative",
-                                on_click=partial(_stop_session_list, s.id),
-                            ).props("flat dense size=sm").mark("session-list-stop").tooltip(
-                                "Stop running session"
+                with ui.link(f"/sessions/{s.id}").mark("session-row"):
+                    with ui.item().props("clickable v-ripple"):
+                        with ui.item_section().props("avatar"):
+                            ui.icon(source_icon(s.source))
+                        with ui.item_section():
+                            ui.item_label(s.title or "(untitled)").classes(
+                                "font-bold" if unread else ""
                             )
-                        ui.label(fmt_age(s.last_active)).classes("text-xs opacity-60")
-                        if unread:
-                            ui.icon("circle", size="8px", color="primary")
-                    with ui.item_section().props("side"):
-                        with ui.row().classes("items-center gap-0.5"):
-                            # `click.stop` (Vue's `.stop` modifier) keeps this
-                            # from also triggering the row's own `on_click`
-                            # navigation — same pattern as the files plugin.
-                            ui.button(
-                                icon="chat",
-                            ).props("flat dense size=sm").on(
-                                "click.stop",
-                                partial(ui.navigate.to, f"/sessions/{s.id}"),
-                            ).mark("chat-session-button").tooltip(
-                                f"Chat with '{s.title or s.id}'"
-                            )
-                            ui.button(
-                                icon="edit",
-                            ).props("flat dense size=sm").on(
-                                "click.stop",
-                                partial(
-                                    _rename,
-                                    s.id,
-                                    s.title or "",
-                                    render_rows,
-                                ),
-                            ).mark("rename-session-button").tooltip(
-                                f"Rename '{s.title or s.id}'"
-                            )
-                            ui.button(
-                                icon="delete",
-                                color="negative",
-                            ).props("flat dense size=sm").on(
-                                "click.stop",
-                                _confirm_delete,
-                            ).mark("delete-session-button").tooltip(
-                                f"Delete '{s.title or s.id}'"
-                            )
+                            # Metadata row: model badge, source name, message count, session ID
+                            with ui.row().classes("items-center gap-1 q-mt-xs"):
+                                if s.model:
+                                    ui.badge(s.model, color="grey-7", size="xs").tooltip(s.model)
+                                source_label = SOURCES.get(s.source, s.source or "unknown")
+                                ui.label(source_label).classes("text-xs opacity-50")
+                                if s.message_count:
+                                    ui.label(f"{s.message_count} msg").classes("text-xs opacity-50")
+                                if s.id:
+                                    ui.label(s.id[:12]).classes("text-xs opacity-30 font-mono")
+                            ui.item_label(oneline(clean_preview(s.preview) or "No preview")).props("caption lines=1")
+                        with ui.item_section().props("side top"):
+                            if is_running(s):
+                                ui.spinner(size="sm", color="positive").mark("session-running")
+                                ui.button(
+                                    icon="stop",
+                                    color="negative",
+                                    on_click=partial(_stop_session_list, s.id),
+                                ).props("flat dense size=sm").mark("session-list-stop").tooltip(
+                                    "Stop running session"
+                                )
+                            ui.label(fmt_age(s.last_active)).classes("text-xs opacity-60")
+                            if unread:
+                                ui.icon("circle", size="8px", color="primary")
+                        with ui.item_section().props("side"):
+                            with ui.row().classes("items-center gap-0.5"):
+                                # `click.stop` (Vue's `.stop` modifier) keeps this
+                                # from also triggering the row's own `on_click`
+                                # navigation — same pattern as the files plugin.
+                                ui.button(
+                                    icon="chat",
+                                ).props("flat dense size=sm").on(
+                                    "click.stop",
+                                    partial(ui.navigate.to, f"/sessions/{s.id}"),
+                                ).mark("chat-session-button").tooltip(
+                                    f"Chat with '{s.title or s.id}'"
+                                )
+                                ui.button(
+                                    icon="edit",
+                                ).props("flat dense size=sm").on(
+                                    "click.stop",
+                                    partial(
+                                        _rename,
+                                        s.id,
+                                        s.title or "",
+                                        render_rows,
+                                    ),
+                                ).mark("rename-session-button").tooltip(
+                                    f"Rename '{s.title or s.id}'"
+                                )
+                                ui.button(
+                                    icon="delete",
+                                    color="negative",
+                                ).props("flat dense size=sm").on(
+                                    "click.stop",
+                                    _confirm_delete,
+                                ).mark("delete-session-button").tooltip(
+                                    f"Delete '{s.title or s.id}'"
+                                )
 
             def render_rows() -> None:
                 """Render the current page's already-fetched sessions.

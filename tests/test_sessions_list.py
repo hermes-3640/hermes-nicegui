@@ -99,12 +99,13 @@ async def test_sessions_nav_item_present(user: User, context: PluginContext) -> 
 
 
 async def test_rows_are_clickable(user: User, context: PluginContext) -> None:
-    """Rows must carry Quasar's `clickable` prop for real-browser clicks."""
+    """Session rows must render as anchor tags with href containing /sessions/."""
     web.build(context, [SessionsPlugin(context)])
     await user.open("/sessions")
     await user.should_see("First session")
-    for item in user.find(marker="session-row").elements:
-        assert item.props.get("clickable") is True
+    for link in user.find(kind=ui.link, marker="session-row").elements:
+        href = link.props.get("href", "")
+        assert "/sessions/" in href
 
 
 async def test_click_row_navigates_to_detail(user: User, context: PluginContext) -> None:
